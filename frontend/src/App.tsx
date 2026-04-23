@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useSimStore } from './stores/simStore'
 import MoodStrip from './components/MoodStrip'
 import TimeControls from './components/TimeControls'
@@ -7,10 +7,48 @@ import KamiGraph from './components/KamiGraph'
 import KamiInspector from './components/Inspector/KamiInspector'
 import AgentInspector from './components/Inspector/AgentInspector'
 import CreateSimModal from './components/CreateSimModal'
+import AgentActivityBoard from './components/AgentActivityBoard'
 
 export default function App() {
   const { loadGraph, refreshStatus, selectedAgent, selectedKami, tickLog, isCreateModalOpen, loadAgents } = useSimStore()
   const logEndRef = useRef<HTMLDivElement>(null)
+
+  const [leftWidth, setLeftWidth] = useState(280)
+  const [rightWidth, setRightWidth] = useState(380)
+
+  const handleLeftDrag = (e: React.MouseEvent) => {
+    e.preventDefault()
+    const startX = e.clientX
+    const startWidth = leftWidth
+
+    const onMouseMove = (moveEvent: MouseEvent) => {
+      const newWidth = Math.max(200, Math.min(600, startWidth + moveEvent.clientX - startX))
+      setLeftWidth(newWidth)
+    }
+    const onMouseUp = () => {
+      document.removeEventListener('mousemove', onMouseMove)
+      document.removeEventListener('mouseup', onMouseUp)
+    }
+    document.addEventListener('mousemove', onMouseMove)
+    document.addEventListener('mouseup', onMouseUp)
+  }
+
+  const handleRightDrag = (e: React.MouseEvent) => {
+    e.preventDefault()
+    const startX = e.clientX
+    const startWidth = rightWidth
+
+    const onMouseMove = (moveEvent: MouseEvent) => {
+      const newWidth = Math.max(250, Math.min(800, startWidth - (moveEvent.clientX - startX)))
+      setRightWidth(newWidth)
+    }
+    const onMouseUp = () => {
+      document.removeEventListener('mousemove', onMouseMove)
+      document.removeEventListener('mouseup', onMouseUp)
+    }
+    document.addEventListener('mousemove', onMouseMove)
+    document.addEventListener('mouseup', onMouseUp)
+  }
 
   useEffect(() => {
     loadGraph()
@@ -36,43 +74,34 @@ export default function App() {
       {/* Main three-column layout */}
       <div className="flex-1 flex overflow-hidden">
         {/* Left: sidebar */}
-        <div className="w-56 border-r border-gray-800 overflow-y-auto">
+        <div style={{ width: leftWidth }} className="flex-shrink-0 border-r border-gray-800 overflow-y-auto">
           <Sidebar />
         </div>
+        
+        {/* Left Resizer */}
+        <div 
+          className="w-1 cursor-col-resize hover:bg-purple-500 bg-gray-800/50 transition-colors z-10" 
+          onMouseDown={handleLeftDrag}
+        />
 
         {/* Center: graph + event log */}
-        <div className="flex-1 flex flex-col">
+        <div className="flex-1 flex flex-col min-w-0">
           <div className="flex-1 min-h-0">
             <KamiGraph />
           </div>
 
-          {/* Event log at bottom of center */}
-          {recentTicks.length > 0 && (
-            <div className="h-48 border-t border-gray-800 overflow-y-auto p-3 text-xs font-mono">
-              <h3 className="text-gray-500 mb-2">Event Log</h3>
-              {recentTicks.map((tick: any, i: number) => (
-                <div key={i} className="mb-2">
-                  <span className="text-yellow-600">tick {tick.tick}</span>
-                  {tick.error && <div className="text-red-500 ml-4 font-bold max-w-lg break-words whitespace-pre-wrap">Error: {tick.error}</div>}
-                  {tick.events?.map((evt: any, j: number) => (
-                    <div key={j} className="ml-4 text-gray-400">
-                      [{evt.event_type}] {evt.narrative}
-                    </div>
-                  ))}
-                  {Object.entries(tick.monologues || {}).map(([agentId, thought]) => (
-                    <div key={agentId} className="ml-4 text-purple-400 italic">
-                      {agentId}: {thought as string}
-                    </div>
-                  ))}
-                </div>
-              ))}
-              <div ref={logEndRef} />
-            </div>
-          )}
+          {/* Agent Activity Board at bottom of center */}
+          <AgentActivityBoard />
         </div>
 
+        {/* Right Resizer */}
+        <div 
+          className="w-1 cursor-col-resize hover:bg-purple-500 bg-gray-800/50 transition-colors z-10" 
+          onMouseDown={handleRightDrag}
+        />
+
         {/* Right: inspector */}
-        <div className="w-80 border-l border-gray-800 overflow-y-auto">
+        <div style={{ width: rightWidth }} className="flex-shrink-0 overflow-y-auto bg-gray-950">
           {selectedAgent ? (
             <AgentInspector />
           ) : selectedKami ? (

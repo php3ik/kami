@@ -95,3 +95,5 @@ export class SimWebSocket {
     this.ws?.close()
   }
 }
+
+export const wsClient = new SimWebSocket()

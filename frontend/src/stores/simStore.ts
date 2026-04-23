@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import * as api from '../api/client'
+import { wsClient } from '../api/client'
 
 interface SimState {
   // Status
@@ -26,6 +27,7 @@ interface SimState {
 
   // Tick log
   tickLog: any[]
+  liveActivity: any[]
 
   // Actions
   refreshStatus: () => Promise<void>
@@ -56,6 +58,7 @@ export const useSimStore = create<SimState>((set, get) => ({
   isCreateModalOpen: false,
   recentEvents: [],
   tickLog: [],
+  liveActivity: [],
 
   refreshStatus: async () => {
     const status = await api.fetchStatus()
@@ -99,20 +102,23 @@ export const useSimStore = create<SimState>((set, get) => ({
   },
 
   step: async (ticks = 1) => {
-    const result = await api.stepTick(ticks)
-    const state = get()
-    set({
-      tickLog: [...state.tickLog, ...(result.results || [])],
-    })
-    await state.refreshStatus()
-    // Refresh selected views
-    if (state.selectedKami) await state.selectKami(state.selectedKami)
-    if (state.selectedAgent) await state.selectAgent(state.selectedAgent)
+    set({ running: true, liveActivity: [] }) // Clear live activity at start of step
+    try {
+      await api.stepTick(ticks)
+      const state = get()
+      // WS will append to tickLog
+      await state.refreshStatus()
+      // Refresh selected views
+      if (state.selectedKami) await state.selectKami(state.selectedKami)
+      if (state.selectedAgent) await state.selectAgent(state.selectedAgent)
+    } finally {
+      set({ running: false })
+    }
   },
 
   startRun: async (ticks = 100) => {
+    set({ running: true, paused: false, liveActivity: [] })
     await api.startRun(ticks)
-    set({ running: true, paused: false })
   },
 
   pause: async () => {
@@ -136,6 +142,21 @@ export const useSimStore = create<SimState>((set, get) => ({
     await get().loadGraph()
     await get().loadAgents()
     await get().refreshStatus()
-    set({ tickLog: [], recentEvents: [], currentTick: 0, selectedKami: null, selectedAgent: null })
+    set({ tickLog: [], recentEvents: [], liveActivity: [], currentTick: 0, selectedKami: null, selectedAgent: null })
   },
 }))
+
+// Setup WebSocket listeners
+wsClient.connect()
+wsClient.onMessage((msg) => {
+  const state = useSimStore.getState()
+  if (msg.type === 'tick') {
+    state.addTickResult(msg.data)
+    useSimStore.setState({ liveActivity: [] }) // clear on tick end
+    state.loadAgents() // update locations
+  } else if (msg.type === 'progress') {
+    useSimStore.setState({
+      liveActivity: [...state.liveActivity, msg.data].slice(-50)
+    })
+  }
+})

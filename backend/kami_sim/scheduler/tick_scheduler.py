@@ -43,10 +43,11 @@ class TickScheduler:
         self.current_tick = 0
         self.tick_log: list[dict] = []
 
-    async def run(self, num_ticks: int, start_tick: int = 0) -> list[dict]:
+    async def run(self, num_ticks: int, start_tick: int | None = None, progress_callback=None) -> list[dict]:
         """Run the simulation for num_ticks ticks."""
-        self.current_tick = start_tick
-        logger.info(f"Starting simulation: {num_ticks} ticks from tick {start_tick}")
+        if start_tick is not None:
+            self.current_tick = start_tick
+        logger.info(f"Starting simulation: {num_ticks} ticks from tick {self.current_tick}")
 
         for i in range(num_ticks):
             tick = self.current_tick
@@ -54,7 +55,7 @@ class TickScheduler:
 
             session = self.session_factory()
             try:
-                tick_result = await self._run_tick(session, tick)
+                tick_result = await self._run_tick(session, tick, progress_callback)
                 tick_result["wall_time_ms"] = int((time.time() - tick_start) * 1000)
                 tick_result["tick_cost_usd"] = round(budget.get_tick_cost(tick), 6)
                 self.tick_log.append(tick_result)
@@ -84,7 +85,7 @@ class TickScheduler:
 
         return self.tick_log
 
-    async def _run_tick(self, session: Session, tick: int) -> dict:
+    async def _run_tick(self, session: Session, tick: int, progress_callback=None) -> dict:
         """Execute one complete BSP tick."""
         all_kami = self.spatial_graph.all_kami_ids()
 
@@ -124,14 +125,26 @@ class TickScheduler:
                     (kami_id, agent_id, recent_dicts)
                 )
 
-        # Run agent cognition calls (sequential for MVP, parallel later)
+        # Run agent cognition calls (parallel)
+        agent_coros = []
         for kami_id, agent_id, recent in agent_tasks:
-            result = await agent_worker.think(
-                agent_id=agent_id,
-                kami_id=kami_id,
-                tick=tick,
-                recent_personal_events=recent,
-            )
+            async def think_task(k_id, a_id, r):
+                if progress_callback:
+                    await progress_callback({"type": "progress", "data": {"step": "agent_think_start", "agent_id": a_id, "kami_id": k_id}})
+                res = await agent_worker.think(
+                    agent_id=a_id,
+                    kami_id=k_id,
+                    tick=tick,
+                    recent_personal_events=r,
+                )
+                if progress_callback:
+                    await progress_callback({"type": "progress", "data": {"step": "agent_think_end", "agent_id": a_id, "kami_id": k_id, "inner_monologue": res.get("inner_monologue", "")}})
+                return k_id, a_id, res
+            agent_coros.append(think_task(kami_id, agent_id, recent))
+
+        agent_results = await asyncio.gather(*agent_coros)
+
+        for kami_id, agent_id, result in agent_results:
             all_intents[kami_id].extend(result.get("intents", []))
             all_monologues[agent_id] = result.get("inner_monologue", "")
 
@@ -153,13 +166,21 @@ class TickScheduler:
 
         # === COMPUTE PHASE 2: Kami resolution (parallel) ===
         kami_worker = KamiWorker(session, self.event_bus, self.spatial_graph)
-        proposals = []
+        kami_coros = []
 
         for kami_id in active_kami:
-            intents = order_intents_by_initiative(all_intents.get(kami_id, []), tick)
-            result = await kami_worker.render_tick(kami_id, tick, intents)
-            result["kami_id"] = kami_id
-            proposals.append(result)
+            async def render_task(k_id):
+                if progress_callback:
+                    await progress_callback({"type": "progress", "data": {"step": "kami_render_start", "kami_id": k_id}})
+                ints = order_intents_by_initiative(all_intents.get(k_id, []), tick)
+                res = await kami_worker.render_tick(k_id, tick, ints)
+                if progress_callback:
+                    await progress_callback({"type": "progress", "data": {"step": "kami_render_end", "kami_id": k_id, "narrative": res.get("narrative", "")}})
+                res["kami_id"] = k_id
+                return res
+            kami_coros.append(render_task(kami_id))
+
+        proposals = await asyncio.gather(*kami_coros)
 
         # === WRITE PHASE ===
         committed_events = commit_proposals(

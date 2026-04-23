@@ -424,8 +424,14 @@ def query_kami_state(session: Session, kami_id: str) -> dict:
                 "states": {s.attribute: s.value for s in states},
             })
 
+    kami_entity = session.get(Entity, kami_id)
+    kami_states = get_state(session, kami_id) if kami_entity else []
+
     return {
         "kami_id": kami_id,
+        "name": kami_entity.canonical_name if kami_entity else kami_id,
+        "archetype": kami_entity.archetype if kami_entity else {},
+        "states": {s.attribute: s.value for s in kami_states},
         "entities": entities,
         "entity_count": len(entities),
     }

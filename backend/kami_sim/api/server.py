@@ -102,7 +102,7 @@ async def get_kami(kami_id: str):
     session = sim_state["session_factory"]()
     try:
         state = fs.query_kami_state(session, kami_id)
-        events = fs.get_events(session, kami_id=kami_id, limit=20)
+        events = fs.get_events(session, kami_id=kami_id, limit=1000)
         return {
             **state,
             "recent_events": [
@@ -190,8 +190,19 @@ async def get_all_agents():
     session = sim_state["session_factory"]()
     try:
         from ..factstore.models import Entity
+        from ..factstore.tools import get_current_location
         agents = session.query(Entity).filter(Entity.kind == "agent").all()
-        return [{"entity_id": a.entity_id, "name": a.canonical_name, "role": a.archetype.get("role", "Unknown")} for a in agents]
+        results = []
+        for a in agents:
+            loc = get_current_location(session, a.entity_id)
+            kami_id = loc.kami_id if loc else None
+            results.append({
+                "entity_id": a.entity_id, 
+                "name": a.canonical_name, 
+                "role": a.archetype.get("role", "Unknown"),
+                "kami_id": kami_id
+            })
+        return results
     finally:
         session.close()
 
@@ -234,7 +245,10 @@ async def step_tick(ticks: int = 1):
     if not scheduler:
         return {"error": "not initialized"}
 
-    results = await scheduler.run(num_ticks=ticks)
+    async def _progress(msg):
+        await _broadcast(msg)
+
+    results = await scheduler.run(num_ticks=ticks, progress_callback=_progress)
 
     # Broadcast to WebSocket clients
     for result in results:
@@ -286,7 +300,9 @@ async def start_run(ticks: int = 100):
         for _ in range(ticks):
             if sim_state["paused"]:
                 break
-            results = await scheduler.run(num_ticks=1)
+            async def _progress(msg):
+                await _broadcast(msg)
+            results = await scheduler.run(num_ticks=1, progress_callback=_progress)
             for result in results:
                 await _broadcast({"type": "tick", "data": result})
         sim_state["running"] = False
