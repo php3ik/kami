@@ -44,16 +44,34 @@ ws_connections: set[WebSocket] = set()
 async def lifespan(app: FastAPI):
     # Startup: init DB and world
     db_url = config.database_url
-    if db_url.startswith("sqlite:///"):
-        import os
-        db_path = db_url.replace("sqlite:///", "")
-        if os.path.exists(db_path):
-            os.remove(db_path)
-
     engine, session_factory = init_db(db_url)
     session = session_factory()
 
-    spatial_graph = build_oriv_world(session)
+    from ..factstore.models import Entity
+    count = session.query(Entity).count()
+
+    if count == 0:
+        logger.info("Database empty, building default Oriv world...")
+        spatial_graph = build_oriv_world(session)
+    else:
+        logger.info(f"Database contains {count} entities, restoring simulation state...")
+        from ..spatial.graph import SpatialGraph
+        spatial_graph = SpatialGraph()
+        
+        import os
+        if os.path.exists("sim_graph.json"):
+            with open("sim_graph.json", "r", encoding="utf-8") as f:
+                graph_data = json.load(f)
+                for node in graph_data.get("nodes", []):
+                    spatial_graph.add_kami(node["id"], name=node.get("name"), kind=node.get("kind"))
+                for edge in graph_data.get("edges", []):
+                    spatial_graph.add_edge(edge["source"], edge["target"], edge_type=edge.get("edge_type", "adjacent"))
+        else:
+            logger.warning("sim_graph.json not found, spatial graph edges will be missing!")
+            kamis = session.query(Entity).filter(Entity.kind == "kami").all()
+            for k in kamis:
+                spatial_graph.add_kami(k.entity_id, name=k.canonical_name, kind=k.archetype.get("kami_kind", "location"))
+
     session.close()
 
     scheduler = TickScheduler(
@@ -276,6 +294,11 @@ async def create_sim(request: CreateSimRequest):
     spatial_graph = load_world_into_db(session, world_output)
     session.close()
 
+    # Save graph for persistence
+    import os
+    with open("sim_graph.json", "w", encoding="utf-8") as f:
+        json.dump(spatial_graph.to_dict(), f, indent=2)
+
     scheduler = TickScheduler(
         session_factory=session_factory,
         spatial_graph=spatial_graph,
@@ -284,6 +307,9 @@ async def create_sim(request: CreateSimRequest):
     sim_state["scheduler"] = scheduler
     sim_state["session_factory"] = session_factory
     sim_state["spatial_graph"] = spatial_graph
+
+    # Update global config to point to new DB
+    config.database_url = db_url
 
     return {"status": "success"}
 
