@@ -108,14 +108,14 @@ export default function KamiGraph() {
     })
 
     // Layout only the kamis and their edges
-    cy.layout({
+    const layoutElements = cy.elements().filter(ele => ele.isEdge() || ele.data('kind') !== 'agent')
+    layoutElements.layout({
       name: 'cose',
       padding: 40,
       animate: false,
       randomize: true, // ensure it spreads out
       nodeRepulsion: () => 400000,
       idealEdgeLength: () => 100,
-      eles: cy.elements().filter(ele => ele.isEdge() || ele.data('kind') !== 'agent'),
     }).run()
 
     cy.on('tap', 'node', (evt) => {

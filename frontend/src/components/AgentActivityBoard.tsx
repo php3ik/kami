@@ -23,9 +23,9 @@ export default function AgentActivityBoard() {
         const latestLiveEnd = [...agentLiveActs].reverse().find(a => a.step === 'agent_think_end')
         const latestHistorical = [...tickLog].reverse().find(t => t.monologues && t.monologues[id])
         
-        const currentThought = latestLiveEnd 
-          ? latestLiveEnd.inner_monologue 
-          : latestHistorical?.monologues[id] || "Waiting for thoughts..."
+        const currentThought = latestLiveEnd?.inner_monologue?.trim()
+          || latestHistorical?.monologues[id]?.trim()
+          || "No thought has been recorded yet."
 
         const isSelected = selectedAgent === id
 

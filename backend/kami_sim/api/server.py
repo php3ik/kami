@@ -15,10 +15,11 @@ import uuid
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import func
 
 from ..config import config
 from ..factstore import tools as fs
-from ..factstore.models import Entity, init_db
+from ..factstore.models import Entity, Event, init_db
 from ..llm.budget import budget
 from ..scheduler.tick_scheduler import TickScheduler
 from ..oriv_world import build_oriv_world
@@ -38,6 +39,12 @@ sim_state: dict[str, Any] = {
 
 # WebSocket connections
 ws_connections: set[WebSocket] = set()
+
+
+def _next_tick_from_db(session) -> int:
+    """Resume after the highest committed event tick in the current database."""
+    max_tick = session.query(func.max(Event.tick)).scalar()
+    return (max_tick + 1) if max_tick is not None else 0
 
 
 @asynccontextmanager
@@ -78,6 +85,11 @@ async def lifespan(app: FastAPI):
         session_factory=session_factory,
         spatial_graph=spatial_graph,
     )
+    tick_session = session_factory()
+    try:
+        scheduler.current_tick = _next_tick_from_db(tick_session)
+    finally:
+        tick_session.close()
 
     sim_state["scheduler"] = scheduler
     sim_state["session_factory"] = session_factory

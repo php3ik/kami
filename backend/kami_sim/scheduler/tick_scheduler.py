@@ -48,6 +48,7 @@ class TickScheduler:
         if start_tick is not None:
             self.current_tick = start_tick
         logger.info(f"Starting simulation: {num_ticks} ticks from tick {self.current_tick}")
+        run_results: list[dict] = []
 
         for i in range(num_ticks):
             tick = self.current_tick
@@ -59,6 +60,7 @@ class TickScheduler:
                 tick_result["wall_time_ms"] = int((time.time() - tick_start) * 1000)
                 tick_result["tick_cost_usd"] = round(budget.get_tick_cost(tick), 6)
                 self.tick_log.append(tick_result)
+                run_results.append(tick_result)
 
                 if (i + 1) % 10 == 0 or i == 0:
                     logger.info(
@@ -69,12 +71,14 @@ class TickScheduler:
                     )
             except Exception as e:
                 logger.error(f"Tick {tick} failed: {e}", exc_info=True)
-                self.tick_log.append({
+                tick_result = {
                     "tick": tick,
                     "error": str(e),
                     "active_kami_count": 0,
                     "active_agent_count": 0,
-                })
+                }
+                self.tick_log.append(tick_result)
+                run_results.append(tick_result)
             finally:
                 session.close()
 
@@ -83,7 +87,7 @@ class TickScheduler:
             # Cleanup old event bus data
             self.event_bus.cleanup_tick(tick)
 
-        return self.tick_log
+        return run_results
 
     async def _run_tick(self, session: Session, tick: int, progress_callback=None) -> dict:
         """Execute one complete BSP tick."""

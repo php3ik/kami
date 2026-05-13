@@ -120,8 +120,10 @@ def load_world_into_db(session, data: dict) -> SpatialGraph:
     
     # 1. Kami
     for k in data["kami_specs"]:
-        fs.create_entity(session, kind="kami", canonical_name=k["name"], tick=0, archetype=k, entity_id=k.get("entity_id", f"kami_{uuid.uuid4().hex[:8]}"))
-        sg.add_kami(k.get("entity_id", f"kami_{uuid.uuid4().hex[:8]}"), name=k["name"], kind=k.get("kind", "unknown"))
+        kami_id = k.get("entity_id") or f"kami_{uuid.uuid4().hex[:8]}"
+        k["entity_id"] = kami_id
+        fs.create_entity(session, kind="kami", canonical_name=k["name"], tick=0, archetype=k, entity_id=kami_id)
+        sg.add_kami(kami_id, name=k["name"], kind=k.get("kind", "unknown"))
         
     for edge in data["spatial_graph"]["edges"]:
         sg.add_edge(edge["source"], edge["target"], edge_type="adjacent",

@@ -78,7 +78,7 @@ class AgentCognitionWorker:
             )
         except Exception as e:
             logger.error(f"LLM call failed for agent {agent_id} tick {tick}: {e}")
-            return self._fallback(agent_id)
+            return self._fallback(agent_id, reason=str(e))
 
         # Parse response
         return self._parse_response(response, agent_id, agent_entity)
@@ -146,7 +146,16 @@ class AgentCognitionWorker:
             "inner_monologue": inner_monologue,
         }
 
-    def _fallback(self, agent_id: str) -> dict:
+    def _fallback(self, agent_id: str, reason: str | None = None) -> dict:
+        inner_monologue = "I pause, unable to gather my thoughts clearly this moment."
+        if reason:
+            if "insufficient_quota" in reason or "exceeded your current quota" in reason:
+                reason = "OpenAI quota is exhausted"
+            elif "rate_limit" in reason or "429" in reason:
+                reason = "LLM rate limit"
+            else:
+                reason = "LLM request failed"
+            inner_monologue = f"{inner_monologue} [{reason}]"
         return {
             "agent_id": agent_id,
             "intents": [{
@@ -158,5 +167,5 @@ class AgentCognitionWorker:
                 "salience": 0.1,
             }],
             "beliefs": [],
-            "inner_monologue": "",
+            "inner_monologue": inner_monologue,
         }

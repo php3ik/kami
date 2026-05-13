@@ -21,6 +21,7 @@ class SimConfig:
     forced_refresh_interval: int = 100  # ticks
 
     # Models
+    llm_provider: str = os.getenv("LLM_PROVIDER", "anthropic")
     cheap_model_name: str = os.getenv("CHEAP_MODEL", "claude-haiku-4-5-20251001")
     strong_model_name: str = os.getenv("STRONG_MODEL", "claude-sonnet-4-6")
     kami_strong_model_threshold_agents: int = 2
@@ -46,6 +47,8 @@ class SimConfig:
 
     # API keys
     anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
+    openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
+    gemini_api_key: str = os.getenv("GEMINI_API_KEY", os.getenv("GOOGLE_API_KEY", ""))
 
 
 # Global singleton

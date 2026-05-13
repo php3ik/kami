@@ -22,15 +22,22 @@ class LLMClient:
     """Wrapper around Anthropic API with tier routing and cost tracking."""
 
     def __init__(self):
-        self._client = anthropic.Anthropic(api_key=config.anthropic_api_key)
+        self._anthropic_client = None
+        self._openai_client = None
+        self._gemini_client = None
 
-    def _get_model(self, tier: str) -> str:
+    def _get_model(self, tier: str) -> tuple[str, str]:
         if tier == "cheap":
-            return config.cheap_model_name
+            model = config.cheap_model_name
         elif tier == "strong":
-            return config.strong_model_name
+            model = config.strong_model_name
         else:
             raise ValueError(f"Unknown tier: {tier}")
+
+        if ":" in model:
+            provider, model_name = model.split(":", 1)
+            return provider.strip().lower(), model_name.strip()
+        return config.llm_provider.strip().lower(), model.strip()
 
     async def call(
         self,
@@ -47,7 +54,52 @@ class LLMClient:
 
         Returns dict with 'content', 'tool_calls', 'usage'.
         """
-        model = self._get_model(tier)
+        provider, model = self._get_model(tier)
+
+        if provider == "anthropic":
+            result = await self._call_anthropic(
+                model, messages, system, tools, max_tokens, temperature, component
+            )
+        elif provider == "openai":
+            result = await self._call_openai(
+                model, messages, system, tools, max_tokens, temperature, component
+            )
+        elif provider == "gemini":
+            result = await self._call_gemini(
+                model, messages, system, tools, max_tokens, temperature, component
+            )
+        else:
+            raise ValueError(
+                f"Unknown LLM provider: {provider}. Use anthropic, openai, or gemini."
+            )
+
+        usage = result["usage"]
+        budget.record_call(
+            model=f"{provider}:{model}",
+            component=component,
+            input_tokens=usage.get("input_tokens", 0),
+            output_tokens=usage.get("output_tokens", 0),
+            cache_read_tokens=usage.get("cache_read", 0),
+            cache_write_tokens=usage.get("cache_write", 0),
+            tick=tick,
+        )
+
+        return result
+
+    async def _call_anthropic(
+        self,
+        model: str,
+        messages: list[dict],
+        system: str | list[dict],
+        tools: list[dict] | None,
+        max_tokens: int,
+        temperature: float,
+        component: str,
+    ) -> dict:
+        if self._anthropic_client is None:
+            self._anthropic_client = anthropic.AsyncAnthropic(
+                api_key=config.anthropic_api_key
+            )
 
         # Build kwargs
         kwargs: dict[str, Any] = {
@@ -76,7 +128,7 @@ class LLMClient:
             kwargs["tools"] = tools
 
         try:
-            response = self._client.messages.create(**kwargs)
+            response = await self._anthropic_client.messages.create(**kwargs)
         except Exception as e:
             logger.error(f"LLM call failed ({component}): {e}")
             raise
@@ -87,17 +139,6 @@ class LLMClient:
         output_tokens = usage.output_tokens
         cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
         cache_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
-
-        # Track cost
-        budget.record_call(
-            model=model,
-            component=component,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cache_read_tokens=cache_read,
-            cache_write_tokens=cache_write,
-            tick=tick,
-        )
 
         # Parse response
         content_text = ""
@@ -123,6 +164,185 @@ class LLMClient:
                 "cache_write": cache_write,
             },
         }
+
+    async def _call_openai(
+        self,
+        model: str,
+        messages: list[dict],
+        system: str | list[dict],
+        tools: list[dict] | None,
+        max_tokens: int,
+        temperature: float,
+        component: str,
+    ) -> dict:
+        if self._openai_client is None:
+            from openai import AsyncOpenAI
+
+            self._openai_client = AsyncOpenAI(api_key=config.openai_api_key)
+
+        openai_messages = []
+        system_text = self._system_to_text(system)
+        if system_text:
+            openai_messages.append({"role": "system", "content": system_text})
+        openai_messages.extend(
+            {
+                "role": m.get("role", "user"),
+                "content": self._content_to_text(m.get("content", "")),
+            }
+            for m in messages
+        )
+
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "messages": openai_messages,
+            "max_completion_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        if tools:
+            kwargs["tools"] = [self._anthropic_tool_to_openai(t) for t in tools]
+
+        try:
+            response = await self._openai_client.chat.completions.create(**kwargs)
+        except Exception as e:
+            logger.error(f"LLM call failed ({component}): {e}")
+            raise
+
+        choice = response.choices[0]
+        message = choice.message
+        tool_calls = []
+        for tc in message.tool_calls or []:
+            arguments = tc.function.arguments or "{}"
+            try:
+                parsed_args = json.loads(arguments)
+            except json.JSONDecodeError:
+                parsed_args = {"raw_arguments": arguments}
+            tool_calls.append({
+                "id": tc.id,
+                "name": tc.function.name,
+                "input": parsed_args,
+            })
+
+        usage = response.usage
+        return {
+            "content": message.content or "",
+            "tool_calls": tool_calls,
+            "stop_reason": choice.finish_reason,
+            "usage": {
+                "input_tokens": usage.prompt_tokens if usage else 0,
+                "output_tokens": usage.completion_tokens if usage else 0,
+                "cache_read": 0,
+                "cache_write": 0,
+            },
+        }
+
+    async def _call_gemini(
+        self,
+        model: str,
+        messages: list[dict],
+        system: str | list[dict],
+        tools: list[dict] | None,
+        max_tokens: int,
+        temperature: float,
+        component: str,
+    ) -> dict:
+        if self._gemini_client is None:
+            from google import genai
+
+            self._gemini_client = genai.Client(api_key=config.gemini_api_key)
+
+        from google.genai import types
+
+        tool_config = None
+        if tools:
+            tool_config = [
+                types.Tool(
+                    function_declarations=[
+                        self._anthropic_tool_to_gemini(t) for t in tools
+                    ]
+                )
+            ]
+
+        contents = "\n\n".join(
+            f"{m.get('role', 'user').upper()}:\n{self._content_to_text(m.get('content', ''))}"
+            for m in messages
+        )
+
+        gen_config = types.GenerateContentConfig(
+            system_instruction=self._system_to_text(system) or None,
+            temperature=temperature,
+            max_output_tokens=max_tokens,
+            tools=tool_config,
+        )
+
+        try:
+            response = await self._gemini_client.aio.models.generate_content(
+                model=model,
+                contents=contents,
+                config=gen_config,
+            )
+        except Exception as e:
+            logger.error(f"LLM call failed ({component}): {e}")
+            raise
+
+        tool_calls = []
+        for idx, fc in enumerate(getattr(response, "function_calls", None) or []):
+            tool_calls.append({
+                "id": f"gemini_call_{idx}",
+                "name": fc.name,
+                "input": dict(fc.args or {}),
+            })
+
+        usage = getattr(response, "usage_metadata", None)
+        return {
+            "content": getattr(response, "text", "") or "",
+            "tool_calls": tool_calls,
+            "stop_reason": None,
+            "usage": {
+                "input_tokens": getattr(usage, "prompt_token_count", 0) if usage else 0,
+                "output_tokens": getattr(usage, "candidates_token_count", 0) if usage else 0,
+                "cache_read": 0,
+                "cache_write": 0,
+            },
+        }
+
+    def _anthropic_tool_to_openai(self, tool: dict) -> dict:
+        return {
+            "type": "function",
+            "function": {
+                "name": tool["name"],
+                "description": tool.get("description", ""),
+                "parameters": tool.get("input_schema", {"type": "object"}),
+            },
+        }
+
+    def _anthropic_tool_to_gemini(self, tool: dict):
+        from google.genai import types
+
+        return types.FunctionDeclaration(
+            name=tool["name"],
+            description=tool.get("description", ""),
+            parameters=tool.get("input_schema", {"type": "object"}),
+        )
+
+    def _system_to_text(self, system: str | list[dict]) -> str:
+        if isinstance(system, str):
+            return system
+        return "\n\n".join(
+            self._content_to_text(block.get("text", "")) for block in system
+        )
+
+    def _content_to_text(self, content: Any) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if isinstance(block, dict):
+                    parts.append(str(block.get("text", block.get("content", ""))))
+                else:
+                    parts.append(str(block))
+            return "\n".join(parts)
+        return str(content)
 
 
 # Global singleton
