@@ -11,9 +11,10 @@ from typing import Any
 
 from ..eventbus.bus import EventBus
 from ..factstore.models import Entity
-from ..factstore.tools import get_events, query_kami_state
+from ..factstore.tools import get_active_conversations, get_events, query_kami_state
 from ..spatial.graph import SpatialGraph
 from sqlalchemy.orm import Session
+from .scene_dynamics import SceneDynamics
 
 SYSTEM_PROMPT = (Path(__file__).parent / "system_prompts" / "kami_system.txt").read_text()
 
@@ -89,6 +90,53 @@ KAMI_TOOLS = [
         },
     },
     {
+        "name": "update_conversation_thread",
+        "description": "Create or update a live conversation/social thread carried across ticks.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "thread_id": {"type": "string"},
+                "participants": {"type": "array", "items": {"type": "string"}},
+                "topic": {"type": "string"},
+                "status": {"type": "string", "description": "active, paused, resolved, ruptured"},
+                "summary": {"type": "string"},
+                "tension": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                "momentum": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                "open_question": {"type": "string"},
+            },
+            "required": ["participants", "topic", "summary"],
+        },
+    },
+    {
+        "name": "record_intent_result",
+        "description": "Mark a specific agent intent as resolved, blocked, partial, or failed.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "intent_id": {"type": "string"},
+                "status": {"type": "string"},
+                "summary": {"type": "string"},
+                "blockers": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["intent_id", "status", "summary"],
+        },
+    },
+    {
+        "name": "adjust_need",
+        "description": "Adjust an embodied agent need after the scene has physical or emotional consequences.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "agent_id": {"type": "string"},
+                "need": {"type": "string", "description": "fatigue, hunger, stress, social, task_pressure"},
+                "delta": {"type": "number"},
+                "value": {"type": "number"},
+                "reason": {"type": "string"},
+            },
+            "required": ["agent_id", "need"],
+        },
+    },
+    {
         "name": "publish_broadcast",
         "description": "Emit a compressed digest for neighboring kami to perceive.",
         "input_schema": {
@@ -111,6 +159,7 @@ def build_kami_prompt(
     agent_intents: list[dict],
     event_bus: EventBus,
     spatial_graph: SpatialGraph,
+    scene_dynamics: SceneDynamics | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """Build the full prompt for a kami worker call.
 
@@ -126,6 +175,8 @@ def build_kami_prompt(
     # 4. Recent events
     recent_events = get_events(session, kami_id=kami_id, since_tick=max(0, tick - 15), limit=15)
     recent_block = _format_recent_events(recent_events)
+    active_threads = _format_threads(get_active_conversations(session, kami_id=kami_id, limit=5))
+    dynamics_block = scene_dynamics.to_prompt_block() if scene_dynamics else ""
 
     # 5. Neighbor digests
     neighbor_digest = _build_neighbor_digest(kami_id, tick, event_bus, spatial_graph)
@@ -161,6 +212,12 @@ def build_kami_prompt(
 
 ### Recent Events
 {recent_block or "No recent events."}
+
+### Active Conversation Threads
+{active_threads or "No active conversation threads."}
+
+### Scene Dynamics Guardrails
+{dynamics_block or "No special scene pressure."}
 
 ### Neighbor Activity
 {neighbor_digest or "Nothing notable from neighbors."}
@@ -258,7 +315,36 @@ def _format_agent_intents(intents: list[dict]) -> str:
         action = intent.get("action_type", "unknown")
         target = intent.get("target", "")
         params = intent.get("params", {})
-        lines.append(f"- {agent} intends to {action}" + (f" targeting {target}" if target else "") + (f" ({params})" if params else ""))
+        intent_id = intent.get("intent_id", "")
+        utterance = intent.get("utterance", "")
+        goal = intent.get("goal", "")
+        details = []
+        if params:
+            details.append(str(params))
+        if goal:
+            details.append(f"goal={goal}")
+        if utterance:
+            details.append(f"says={utterance}")
+        if intent_id:
+            details.append(f"intent_id={intent_id}")
+        lines.append(
+            f"- {agent} intends to {action}"
+            + (f" targeting {target}" if target else "")
+            + (f" ({'; '.join(details)})" if details else "")
+        )
+    return "\n".join(lines)
+
+
+def _format_threads(threads: list) -> str:
+    lines = []
+    for thread in threads:
+        participants = ", ".join(thread.participants or [])
+        lines.append(
+            f"- {thread.thread_id}: {thread.topic}; participants={participants}; "
+            f"status={thread.status}; tension={thread.tension:.2f}; "
+            f"momentum={thread.momentum:.2f}; summary={thread.summary}"
+            + (f"; open={thread.open_question}" if thread.open_question else "")
+        )
     return "\n".join(lines)
 
 

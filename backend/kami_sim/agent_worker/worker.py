@@ -98,6 +98,11 @@ class AgentCognitionWorker:
                     "target": inp.get("target", ""),
                     "params": inp.get("params", {}),
                     "salience": inp.get("salience", 0.3),
+                    "goal": inp.get("goal", ""),
+                    "utterance": inp.get("utterance", ""),
+                    "expected_outcome": inp.get("expected_outcome", ""),
+                    "continues_thread_id": inp.get("continues_thread_id", ""),
+                    "exit_condition": inp.get("exit_condition", ""),
                 })
             elif tc["name"] == "update_belief":
                 inp = tc["input"]

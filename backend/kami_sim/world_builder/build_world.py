@@ -6,95 +6,29 @@ Usage: python -m kami_sim.world_builder.build_world --prompt "..." --output worl
 from __future__ import annotations
 
 import argparse
-import asyncio
 import json
 import logging
-import sys
 import uuid
 from pathlib import Path
 
 from ..factstore import tools as fs
 from ..spatial.graph import SpatialGraph
 
-from ..llm.budget import budget
-from .cascades.seed import generate_world_seed
-from .cascades.decompose import decompose_town
-from .cascades.populate import generate_population
-from .cascades.social import generate_social_fabric
-from .cascades.backstory import generate_backstory
-from .validators import (
-    validate_after_decomposition,
-    validate_after_population,
-    validate_social_fabric,
-)
+from .dynamic_world import build_dynamic_world
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 
-async def build_world(prompt: str, agent_count: int = 100) -> dict:
-    """Run all 5 cascades to generate a complete world."""
+async def build_world(prompt: str, agent_count: int = 100, name: str | None = None) -> dict:
+    """Generate a complete world dynamically from the user's text.
 
-    # Cascade 1: World seed
-    logger.info("Cascade 1: Generating world seed...")
-    world_seed = await generate_world_seed(prompt)
-    logger.info(f"World seed: {world_seed.get('town_name', 'unnamed')}")
-
-    # Cascade 2: Spatial decomposition
-    logger.info("Cascade 2: Spatial decomposition...")
-    kami_specs, spatial_graph = await decompose_town(world_seed)
-    logger.info(f"Generated {len(kami_specs)} kami")
-
-    # Validate
-    errors = validate_after_decomposition(kami_specs, spatial_graph, world_seed)
-    for e in errors:
-        logger.warning(f"Validation: {e}")
-
-    # Cascade 2.5: Slot inventory
-    residential_count = len([k for k in kami_specs if k.get("kind") == "residential"])
-    work_count = len([k for k in kami_specs if k.get("kind") in ("commercial", "industrial", "institutional")])
-    logger.info(f"Slots: {residential_count} residential, {work_count} work")
-
-    # Cascade 3: Population
-    logger.info(f"Cascade 3: Generating {agent_count} agents...")
-    agents = await generate_population(world_seed, kami_specs, target_count=agent_count)
-    logger.info(f"Generated {len(agents)} agents")
-
-    errors = validate_after_population(agents, kami_specs, world_seed)
-    for e in errors:
-        logger.warning(f"Validation: {e}")
-
-    # Cascade 4: Social fabric
-    logger.info("Cascade 4: Generating social fabric...")
-    relationships = await generate_social_fabric(agents, world_seed)
-    logger.info(f"Generated {len(relationships)} relationships")
-
-    errors = validate_social_fabric(relationships, agents)
-    for e in errors:
-        logger.warning(f"Validation: {e}")
-
-    # Cascade 5: Backstory injection
-    logger.info("Cascade 5: Generating backstories...")
-    backstories = {}
-    for i, agent in enumerate(agents):
-        agent_rels = [r for r in relationships if agent["name"] in r.get("names", [])]
-        backstory = await generate_backstory(agent, agent_rels, world_seed)
-        backstories[agent["name"]] = backstory
-        if (i + 1) % 10 == 0:
-            logger.info(f"Backstory progress: {i + 1}/{len(agents)}")
-
-    # Assemble output
-    output = {
-        "world_seed": world_seed,
-        "kami_specs": kami_specs,
-        "spatial_graph": spatial_graph.to_dict(),
-        "agents": agents,
-        "relationships": relationships,
-        "backstories": backstories,
-        "budget": budget.get_summary(),
-    }
-
-    return output
+    No domain-specific fallback templates are used. If the model cannot produce
+    a valid structured world after repair, the caller receives an error instead
+    of a misleading canned world.
+    """
+    logger.info("Generating dynamic world from prompt...")
+    return await build_dynamic_world(prompt, agent_count=agent_count, name=name)
 
 
 def main():
@@ -102,9 +36,11 @@ def main():
     parser.add_argument("--prompt", type=str, required=True, help="World premise")
     parser.add_argument("--output", type=str, default="world.json", help="Output file")
     parser.add_argument("--agents", type=int, default=100, help="Number of agents")
+    parser.add_argument("--name", type=str, default=None, help="Optional world name")
     args = parser.parse_args()
 
-    result = asyncio.run(build_world(args.prompt, agent_count=args.agents))
+    import asyncio
+    result = asyncio.run(build_world(args.prompt, agent_count=args.agents, name=args.name))
 
     Path(args.output).write_text(json.dumps(result, indent=2, default=str))
     logger.info(f"World written to {args.output}")
@@ -115,29 +51,52 @@ if __name__ == "__main__":
     main()
 
 
-def load_world_into_db(session, data: dict) -> SpatialGraph:
+def load_world_into_db(session, data: dict, simulation_id: str | None = None) -> SpatialGraph:
     sg = SpatialGraph()
+    prefix = f"sim_{simulation_id}__" if simulation_id else ""
+
+    def scoped_id(raw: str) -> str:
+        if not prefix or raw.startswith(prefix):
+            return raw
+        return f"{prefix}{raw}"
     
     # 1. Kami
     for k in data["kami_specs"]:
-        kami_id = k.get("entity_id") or f"kami_{uuid.uuid4().hex[:8]}"
+        original_id = k.get("entity_id") or f"kami_{uuid.uuid4().hex[:8]}"
+        kami_id = scoped_id(original_id)
         k["entity_id"] = kami_id
+        k["simulation_id"] = simulation_id
+        ambient_objects = k.get("ambient_objects") or []
+        if ambient_objects:
+            k["description"] = (
+                f"{k.get('description', '')}\n\n"
+                f"Local history: {k.get('history', '')}\n"
+                f"Current situation: {k.get('current_situation', '')}\n"
+                f"Visible objects and fixtures: {', '.join(str(item) for item in ambient_objects)}"
+            ).strip()
         fs.create_entity(session, kind="kami", canonical_name=k["name"], tick=0, archetype=k, entity_id=kami_id)
         sg.add_kami(kami_id, name=k["name"], kind=k.get("kind", "unknown"))
         
     for edge in data["spatial_graph"]["edges"]:
-        sg.add_edge(edge["source"], edge["target"], edge_type="adjacent",
+        sg.add_edge(scoped_id(edge["source"]), scoped_id(edge["target"]), edge_type="adjacent",
                     visual_attenuation=edge.get("visual_attenuation", 0.5),
                     audio_attenuation=edge.get("audio_attenuation", 0.5))
                     
     # 2. Agents
+    kami_ids = [k.get("entity_id") for k in data["kami_specs"]]
     for idx, a in enumerate(data["agents"]):
-        agent_id = f"agent_{idx}"
+        original_agent_id = a.get("entity_id") or f"agent_{idx}"
+        agent_id = scoped_id(original_agent_id)
         a["entity_id"] = agent_id
+        a["simulation_id"] = simulation_id
+        if a.get("home"):
+            a["home"] = scoped_id(a["home"])
+        if a.get("work"):
+            a["work"] = scoped_id(a["work"])
         
         fs.create_entity(session, kind="agent", canonical_name=a["name"], tick=0, archetype=a, entity_id=agent_id)
         # Attempt to bind agent to their native home
-        kami_id = a.get("home") if a.get("home") in [k.get("entity_id") for k in data["kami_specs"]] else data["kami_specs"][0].get("entity_id")
+        kami_id = a.get("home") if a.get("home") in kami_ids else data["kami_specs"][0].get("entity_id")
         fs.place_entity(session, agent_id, kami_id, tick=0)
 
     # 3. Relationships
@@ -148,13 +107,54 @@ def load_world_into_db(session, data: dict) -> SpatialGraph:
             a1 = name_to_id.get(names[0])
             a2 = name_to_id.get(names[1])
             if a1 and a2:
-                fs.update_relation(session, a1, a2, "knows", tick=0, weight={"context": r.get("story", "")})
-                fs.update_relation(session, a2, a1, "knows", tick=0, weight={"context": r.get("story", "")})
+                rel_type = r.get("rel_type", "knows")
+                weight = {
+                    "context": r.get("story", ""),
+                    "trust": r.get("trust"),
+                    "tension": r.get("tension"),
+                }
+                fs.update_relation(session, a1, a2, "knows", tick=0, weight=weight)
+                fs.update_relation(session, a2, a1, "knows", tick=0, weight=weight)
+                fs.update_relation(session, a1, a2, rel_type, tick=0, weight=weight)
+                fs.update_relation(session, a2, a1, rel_type, tick=0, weight=weight)
+
+    # 4. Objects and local props
+    valid_kamis = {k.get("entity_id") for k in data["kami_specs"]}
+    for idx, obj in enumerate(data.get("objects", [])):
+        object_id = obj.get("entity_id") or f"obj_{uuid.uuid4().hex[:8]}"
+        object_id = scoped_id(object_id)
+        kami_id = scoped_id(obj.get("kami_id")) if obj.get("kami_id") else None
+        if kami_id not in valid_kamis:
+            continue
+        kind = obj.get("kind", "object")
+        if kind not in {"object", "document", "vehicle", "plant", "animal"}:
+            kind = "object"
+        archetype = {
+            **obj,
+            "entity_id": object_id,
+            "simulation_id": simulation_id,
+            "description": obj.get("description", ""),
+        }
+        fs.create_entity(
+            session,
+            kind=kind,
+            canonical_name=obj.get("name") or f"Object {idx + 1}",
+            tick=0,
+            archetype=archetype,
+            entity_id=object_id,
+        )
+        fs.place_entity(session, object_id, kami_id, tick=0)
+        state = obj.get("state") if isinstance(obj.get("state"), dict) else {}
+        for attribute, value in state.items():
+            fs.change_state(session, object_id, str(attribute), value, tick=0)
 
     # Initial physical states
     for a in data["agents"]:
-        fs.change_state(session, a["entity_id"], "fatigue", 0.0, tick=0)
-        fs.change_state(session, a["entity_id"], "hunger", 0.0, tick=0)
+        needs = a.get("needs", {})
+        fs.change_state(session, a["entity_id"], "fatigue", needs.get("fatigue", 0.0), tick=0)
+        fs.change_state(session, a["entity_id"], "hunger", needs.get("hunger", 0.0), tick=0)
+        for need, value in needs.items():
+            fs.set_agent_need(session, a["entity_id"], need, value, tick=0)
         
     session.commit()
     return sg

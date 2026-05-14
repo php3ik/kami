@@ -78,7 +78,16 @@ def commit_proposals(
                     "event_type": event.event_type,
                     "narrative": event.narrative,
                     "salience": event.salience,
+                    "participants": event.participants,
+                    "payload": event.payload,
                 })
+                fs.settle_tick_intents(
+                    session,
+                    tick=tick,
+                    event_id=event.event_id,
+                    participants=event.participants or [],
+                    narrative=event.narrative or "",
+                )
             except Exception as e:
                 logger.error(f"Event emit failed: {e}")
 
@@ -179,5 +188,36 @@ def _apply_mutation(session: Session, tick: int, mutation: dict, spatial_graph: 
             new_owner_id=mutation["new_owner_id"],
             tick=tick,
         )
+    elif mtype == "record_intent_result":
+        fs.mark_intent_result(
+            session,
+            intent_id=mutation["intent_id"],
+            status=mutation.get("status", "resolved"),
+            result_summary=mutation.get("summary", ""),
+            blockers=mutation.get("blockers", []),
+        )
+    elif mtype == "update_conversation_thread":
+        fs.upsert_conversation_thread(
+            session,
+            tick=tick,
+            kami_id=mutation.get("kami_id"),
+            participants=mutation.get("participants", []),
+            topic=mutation.get("topic", "unfinished exchange"),
+            summary=mutation.get("summary", ""),
+            status=mutation.get("status", "active"),
+            tension=mutation.get("tension", 0.0),
+            momentum=mutation.get("momentum", 0.5),
+            open_question=mutation.get("open_question"),
+            thread_id=mutation.get("thread_id"),
+            last_event_id=mutation.get("last_event_id"),
+        )
+    elif mtype == "adjust_need":
+        current = fs.get_agent_needs(session, mutation["agent_id"])
+        need = mutation["need"]
+        if "value" in mutation:
+            value = mutation["value"]
+        else:
+            value = current.get(need, 0.0) + mutation.get("delta", 0.0)
+        fs.set_agent_need(session, mutation["agent_id"], need, value, tick)
     else:
         logger.warning(f"Unknown mutation type: {mtype}")

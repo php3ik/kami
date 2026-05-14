@@ -1,0 +1,143 @@
+{
+  "nodes": [
+    {
+      "id": "kami_village_square",
+      "name": "\u041f\u043b\u043e\u0449\u0430 \u0431\u0456\u043b\u044f \u043a\u0440\u0438\u043d\u0438\u0446\u0456",
+      "kind": "public_outdoor"
+    },
+    {
+      "id": "kami_bus_stop",
+      "name": "\u0410\u0432\u0442\u043e\u0431\u0443\u0441\u043d\u0430 \u0437\u0443\u043f\u0438\u043d\u043a\u0430 \u043d\u0430 \u0422\u0440\u0443\u0441\u043a\u0430\u0432\u0435\u0446\u044c",
+      "kind": "transit"
+    },
+    {
+      "id": "kami_church_yard",
+      "name": "\u0426\u0435\u0440\u043a\u043e\u0432\u043d\u0435 \u043f\u043e\u0434\u0432\u0456\u0440'\u044f",
+      "kind": "institutional"
+    },
+    {
+      "id": "kami_old_shop",
+      "name": "\u041a\u0440\u0430\u043c\u043d\u0438\u0446\u044f \u043f\u0430\u043d\u0456 \u041c\u0430\u0440\u0456\u0457",
+      "kind": "commercial"
+    },
+    {
+      "id": "kami_hutsul_lane",
+      "name": "\u0412\u0443\u043b\u0438\u0447\u043a\u0430 \u0441\u0442\u0430\u0440\u0438\u0445 \u0441\u0430\u0434\u0438\u0431",
+      "kind": "residential"
+    },
+    {
+      "id": "kami_maria_house",
+      "name": "\u0425\u0430\u0442\u0430 \u041c\u0430\u0440\u0456\u0457 \u041a\u043e\u0432\u0430\u043b\u044c",
+      "kind": "residential"
+    },
+    {
+      "id": "kami_petro_yard",
+      "name": "\u0414\u0432\u0456\u0440 \u041f\u0435\u0442\u0440\u0430 \u0411\u043e\u0439\u043a\u0430",
+      "kind": "residential"
+    },
+    {
+      "id": "kami_it_house",
+      "name": "\u041e\u0440\u0435\u043d\u0434\u043e\u0432\u0430\u043d\u0430 \u0445\u0430\u0442\u0430 \u0430\u0439\u0442\u0456\u0448\u043d\u0438\u043a\u0456\u0432",
+      "kind": "residential"
+    },
+    {
+      "id": "kami_cowork_corner",
+      "name": "\u041a\u0456\u043c\u043d\u0430\u0442\u0430 \u0437 \u0440\u043e\u0443\u0442\u0435\u0440\u043e\u043c",
+      "kind": "public_indoor"
+    },
+    {
+      "id": "kami_forest_path",
+      "name": "\u0421\u0442\u0435\u0436\u043a\u0430 \u0434\u043e \u0441\u043c\u0435\u0440\u0435\u043a\u043e\u0432\u043e\u0433\u043e \u043b\u0456\u0441\u0443",
+      "kind": "public_outdoor"
+    },
+    {
+      "id": "kami_spring",
+      "name": "\u041c\u0456\u043d\u0435\u0440\u0430\u043b\u044c\u043d\u0435 \u0434\u0436\u0435\u0440\u0435\u043b\u043e \u0437\u0430 \u0441\u0435\u043b\u043e\u043c",
+      "kind": "public_outdoor"
+    },
+    {
+      "id": "kami_abandoned_pansionat",
+      "name": "\u041f\u043e\u043a\u0438\u043d\u0443\u0442\u0438\u0439 \u043f\u0430\u043d\u0441\u0456\u043e\u043d\u0430\u0442",
+      "kind": "industrial"
+    }
+  ],
+  "edges": [
+    {
+      "source": "kami_village_square",
+      "target": "kami_bus_stop",
+      "edge_type": "adjacent",
+      "visual_attenuation": 0.25,
+      "audio_attenuation": 0.35
+    },
+    {
+      "source": "kami_village_square",
+      "target": "kami_church_yard",
+      "edge_type": "adjacent",
+      "visual_attenuation": 0.25,
+      "audio_attenuation": 0.35
+    },
+    {
+      "source": "kami_village_square",
+      "target": "kami_old_shop",
+      "edge_type": "adjacent",
+      "visual_attenuation": 0.25,
+      "audio_attenuation": 0.35
+    },
+    {
+      "source": "kami_village_square",
+      "target": "kami_hutsul_lane",
+      "edge_type": "adjacent",
+      "visual_attenuation": 0.25,
+      "audio_attenuation": 0.35
+    },
+    {
+      "source": "kami_bus_stop",
+      "target": "kami_forest_path",
+      "edge_type": "adjacent",
+      "visual_attenuation": 0.25,
+      "audio_attenuation": 0.35
+    },
+    {
+      "source": "kami_hutsul_lane",
+      "target": "kami_maria_house",
+      "edge_type": "adjacent",
+      "visual_attenuation": 0.25,
+      "audio_attenuation": 0.35
+    },
+    {
+      "source": "kami_hutsul_lane",
+      "target": "kami_petro_yard",
+      "edge_type": "adjacent",
+      "visual_attenuation": 0.25,
+      "audio_attenuation": 0.35
+    },
+    {
+      "source": "kami_hutsul_lane",
+      "target": "kami_it_house",
+      "edge_type": "adjacent",
+      "visual_attenuation": 0.25,
+      "audio_attenuation": 0.35
+    },
+    {
+      "source": "kami_it_house",
+      "target": "kami_cowork_corner",
+      "edge_type": "adjacent",
+      "visual_attenuation": 0.25,
+      "audio_attenuation": 0.35
+    },
+    {
+      "source": "kami_forest_path",
+      "target": "kami_spring",
+      "edge_type": "adjacent",
+      "visual_attenuation": 0.25,
+      "audio_attenuation": 0.35
+    },
+    {
+      "source": "kami_forest_path",
+      "target": "kami_abandoned_pansionat",
+      "edge_type": "adjacent",
+      "visual_attenuation": 0.25,
+      "audio_attenuation": 0.35
+    }
+  ]
+}

@@ -47,6 +47,7 @@ class LLMClient:
         component: str = "unknown",
         tick: int | None = None,
         tools: list[dict] | None = None,
+        response_format: dict | None = None,
         max_tokens: int = 2048,
         temperature: float = 0.7,
     ) -> dict:
@@ -58,11 +59,11 @@ class LLMClient:
 
         if provider == "anthropic":
             result = await self._call_anthropic(
-                model, messages, system, tools, max_tokens, temperature, component
+                model, messages, system, tools, response_format, max_tokens, temperature, component
             )
         elif provider == "openai":
             result = await self._call_openai(
-                model, messages, system, tools, max_tokens, temperature, component
+                model, messages, system, tools, response_format, max_tokens, temperature, component
             )
         elif provider == "gemini":
             result = await self._call_gemini(
@@ -92,6 +93,7 @@ class LLMClient:
         messages: list[dict],
         system: str | list[dict],
         tools: list[dict] | None,
+        response_format: dict | None,
         max_tokens: int,
         temperature: float,
         component: str,
@@ -171,6 +173,7 @@ class LLMClient:
         messages: list[dict],
         system: str | list[dict],
         tools: list[dict] | None,
+        response_format: dict | None,
         max_tokens: int,
         temperature: float,
         component: str,
@@ -196,16 +199,37 @@ class LLMClient:
             "model": model,
             "messages": openai_messages,
             "max_completion_tokens": max_tokens,
-            "temperature": temperature,
         }
+        if self._openai_uses_reasoning_controls(model):
+            kwargs["reasoning_effort"] = "none" if component == "WorldBuilder" else "low"
+        if not self._openai_uses_default_temperature(model):
+            kwargs["temperature"] = temperature
         if tools:
             kwargs["tools"] = [self._anthropic_tool_to_openai(t) for t in tools]
+            if component == "WorldBuilder" and len(tools) == 1:
+                kwargs["tool_choice"] = {
+                    "type": "function",
+                    "function": {"name": tools[0]["name"]},
+                }
+            elif component == "KamiWorker":
+                kwargs["tool_choice"] = "required"
+        if response_format:
+            kwargs["response_format"] = response_format
 
         try:
             response = await self._openai_client.chat.completions.create(**kwargs)
         except Exception as e:
-            logger.error(f"LLM call failed ({component}): {e}")
-            raise
+            if "reasoning_effort" in kwargs:
+                logger.warning(
+                    "Retrying OpenAI call without reasoning_effort (%s): %s",
+                    component,
+                    e,
+                )
+                kwargs.pop("reasoning_effort", None)
+                response = await self._openai_client.chat.completions.create(**kwargs)
+            else:
+                logger.error(f"LLM call failed ({component}): {e}")
+                raise
 
         choice = response.choices[0]
         message = choice.message
@@ -314,6 +338,15 @@ class LLMClient:
                 "parameters": tool.get("input_schema", {"type": "object"}),
             },
         }
+
+    def _openai_uses_default_temperature(self, model: str) -> bool:
+        """Newer reasoning models reject custom temperature values."""
+        lowered = model.lower()
+        return lowered.startswith(("gpt-5", "o1", "o3", "o4"))
+
+    def _openai_uses_reasoning_controls(self, model: str) -> bool:
+        lowered = model.lower()
+        return lowered.startswith(("gpt-5", "o1", "o3", "o4"))
 
     def _anthropic_tool_to_gemini(self, tool: dict):
         from google.genai import types

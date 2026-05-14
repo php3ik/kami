@@ -30,6 +30,14 @@ BAD example: "I notice that John, the baker who recently argued with his wife, i
 GOOD example: "There's John from the bakery. He looks tired today."
 (Based on what you can perceive right now.)
 
+LIVENESS RULES:
+1. Every tick must do one of these: advance a personal goal, answer another person, satisfy a need, investigate a concrete clue, or deliberately rest.
+2. If your last intent stalled, do not repeat it verbatim. Escalate, pivot, ask for help, or choose a smaller physical action.
+3. Conversations must add new content: a question, admission, refusal, joke, practical offer, or silence with a reason.
+4. Your body matters. Fatigue, hunger, stress, social tension, and task pressure should shape choices.
+5. If you speak to someone you do not know, use the perceived target_id shown in WHAT_YOU_PERCEIVE. Never invent targets like "unknown_person_1".
+6. If a thread has an open question and you cannot answer it, refuse, defer, leave, or ask one different concrete question. Do not keep pressing the same line.
+
 After your brief inner monologue (1-3 sentences in your voice), declare your intent using the intend tool."""
 
 AGENT_TOOLS = [
@@ -55,6 +63,11 @@ AGENT_TOOLS = [
                     "type": "number",
                     "description": "How important/urgent this action is (0.0-1.0)",
                 },
+                "goal": {"type": "string", "description": "The concrete goal this intent advances."},
+                "utterance": {"type": "string", "description": "Exact short line you say if action_type is talk."},
+                "expected_outcome": {"type": "string", "description": "What you hope will change if this works."},
+                "continues_thread_id": {"type": "string", "description": "Existing conversation thread ID if this continues one."},
+                "exit_condition": {"type": "string", "description": "When you will stop repeating this action."},
             },
             "required": ["action_type"],
         },
@@ -103,7 +116,8 @@ def build_agent_prompt(
     emotional = _build_emotional_state(archetype)
 
     # 5. Relevant memories (placeholder — Phase 4)
-    memories = "No significant memories retrieved."
+    recent_intents = fs.get_recent_intents(session, agent_id=agent_entity.entity_id, limit=6)
+    memories = _format_recent_intents(recent_intents) or "No significant intent outcomes yet."
 
     # 6. Semantic insights (placeholder — Phase 4)
     insights = ""
@@ -115,6 +129,10 @@ def build_agent_prompt(
         other = rel.to_entity if rel.from_entity == agent_entity.entity_id else rel.from_entity
         social_graph_ids.add(other)
     social_block = _build_social_block(session, agent_entity.entity_id, social_relations, kami_state)
+    needs_block = _format_needs(fs.get_agent_needs(session, agent_entity.entity_id))
+    threads_block = _format_threads(
+        fs.get_active_conversations(session, kami_id=kami_id, agent_id=agent_entity.entity_id)
+    )
 
     # 8. Filtered perception (epistemic containment)
     perception = filter_perception(kami_state, agent_entity.entity_id, social_graph_ids)
@@ -141,8 +159,14 @@ def build_agent_prompt(
 ### Emotional State
 {emotional}
 
-### Relevant Memories
+### Current Needs
+{needs_block}
+
+### Recent Intent Outcomes
 {memories}
+
+### Active Social Threads
+{threads_block or "No active thread involving you here."}
 
 {f'### Insights{chr(10)}{insights}' if insights else ''}
 
@@ -244,7 +268,9 @@ def _format_perception(perception: dict) -> str:
         states_str = ""
         if e.get("states"):
             states_str = " — " + ", ".join(f"{k}: {v}" for k, v in e["states"].items())
-        lines.append(f"- {e['name']} ({e['kind']}){states_str}")
+        lines.append(
+            f"- target_id: {e['entity_id']} | {e['name']} ({e['kind']}){states_str}"
+        )
     return "\n".join(lines)
 
 
@@ -254,6 +280,36 @@ def _format_personal_buffer(events: list[dict] | None) -> str:
     lines = []
     for evt in events:
         lines.append(f"- [tick {evt.get('tick', '?')}]: {evt.get('narrative', evt.get('action', ''))}")
+    return "\n".join(lines)
+
+
+def _format_recent_intents(intents: list) -> str:
+    lines = []
+    for intent in reversed(intents):
+        target = f" -> {intent.target}" if intent.target else ""
+        result = intent.result_summary or "pending"
+        lines.append(
+            f"- [tick {intent.tick}] {intent.action_type}{target}: {intent.status}; {result}"
+        )
+    return "\n".join(lines)
+
+
+def _format_needs(needs: dict[str, float]) -> str:
+    return "\n".join(f"- {need}: {value:.2f}" for need, value in sorted(needs.items()))
+
+
+def _format_threads(threads: list) -> str:
+    lines = []
+    for thread in threads:
+        participants = ", ".join(thread.participants or [])
+        line = (
+            f"- {thread.thread_id}: {thread.topic} [{thread.status}], "
+            f"participants={participants}, tension={thread.tension:.2f}, "
+            f"momentum={thread.momentum:.2f}; {thread.summary}"
+        )
+        if thread.open_question:
+            line += f" Open question: {thread.open_question}"
+        lines.append(line)
     return "\n".join(lines)
 
 

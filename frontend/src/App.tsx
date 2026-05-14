@@ -8,13 +8,16 @@ import KamiInspector from './components/Inspector/KamiInspector'
 import AgentInspector from './components/Inspector/AgentInspector'
 import CreateSimModal from './components/CreateSimModal'
 import AgentActivityBoard from './components/AgentActivityBoard'
+import TimelinePreview from './components/TimelinePreview'
+import { GitBranch, Rows3 } from 'lucide-react'
 
 export default function App() {
-  const { loadGraph, refreshStatus, selectedAgent, selectedKami, tickLog, isCreateModalOpen, loadAgents } = useSimStore()
+  const { loadGraph, refreshStatus, selectedAgent, selectedKami, tickLog, isCreateModalOpen, loadAgents, viewMode, setViewMode, loadSimulations } = useSimStore()
   const logEndRef = useRef<HTMLDivElement>(null)
 
   const [leftWidth, setLeftWidth] = useState(280)
   const [rightWidth, setRightWidth] = useState(380)
+  const [isNarrow, setIsNarrow] = useState(false)
 
   const handleLeftDrag = (e: React.MouseEvent) => {
     e.preventDefault()
@@ -53,7 +56,15 @@ export default function App() {
   useEffect(() => {
     loadGraph()
     loadAgents()
+    loadSimulations()
     refreshStatus()
+  }, [])
+
+  useEffect(() => {
+    const update = () => setIsNarrow(window.innerWidth < 900)
+    update()
+    window.addEventListener('resize', update)
+    return () => window.removeEventListener('resize', update)
   }, [])
 
   useEffect(() => {
@@ -64,7 +75,7 @@ export default function App() {
   const recentTicks = tickLog.slice(-20)
 
   return (
-    <div className="h-screen flex flex-col bg-gray-950 text-gray-100">
+    <div className={`${isNarrow ? 'min-h-screen' : 'h-screen'} flex flex-col bg-slate-950 text-slate-100`}>
       {/* Top: mood strip */}
       <MoodStrip />
 
@@ -72,36 +83,67 @@ export default function App() {
       <TimeControls />
 
       {/* Main three-column layout */}
-      <div className="flex-1 flex overflow-hidden">
+      <div className={`flex-1 ${isNarrow ? 'flex flex-col overflow-y-auto' : 'flex overflow-hidden'}`}>
         {/* Left: sidebar */}
-        <div style={{ width: leftWidth }} className="flex-shrink-0 border-r border-gray-800 overflow-y-auto">
+        <div
+          style={isNarrow ? undefined : { width: leftWidth }}
+          className={`${isNarrow ? 'h-80 border-b' : 'flex-shrink-0 border-r overflow-y-auto'} border-slate-800`}
+        >
           <Sidebar />
         </div>
         
         {/* Left Resizer */}
-        <div 
+        {!isNarrow && <div 
           className="w-1 cursor-col-resize hover:bg-purple-500 bg-gray-800/50 transition-colors z-10" 
           onMouseDown={handleLeftDrag}
-        />
+        />}
 
         {/* Center: graph + event log */}
-        <div className="flex-1 flex flex-col min-w-0">
-          <div className="flex-1 min-h-0">
-            <KamiGraph />
+        <div className={`${isNarrow ? 'min-h-[760px]' : 'flex-1'} flex flex-col min-w-0`}>
+          <div className="flex items-center justify-between gap-3 px-4 py-2 border-b border-slate-800 bg-slate-950">
+            <div className="text-xs text-slate-500">
+              {viewMode === 'graph' ? 'Spatial map of kami and live agent positions' : 'Temporal matrix of ticks, entities and state snapshots'}
+            </div>
+            <div className="inline-flex rounded border border-slate-800 bg-slate-900 p-1">
+              <button
+                onClick={() => setViewMode('graph')}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-xs transition-colors ${
+                  viewMode === 'graph' ? 'bg-blue-700 text-white' : 'text-slate-400 hover:text-slate-100'
+                }`}
+              >
+                <GitBranch size={13} />
+                Graph
+              </button>
+              <button
+                onClick={() => setViewMode('timeline')}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-xs transition-colors ${
+                  viewMode === 'timeline' ? 'bg-purple-700 text-white' : 'text-slate-400 hover:text-slate-100'
+                }`}
+              >
+                <Rows3 size={13} />
+                Timeline
+              </button>
+            </div>
+          </div>
+          <div className={`${isNarrow ? 'h-[420px]' : 'flex-1 min-h-0'}`}>
+            {viewMode === 'graph' ? <KamiGraph /> : <TimelinePreview />}
           </div>
 
           {/* Agent Activity Board at bottom of center */}
-          <AgentActivityBoard />
+          {viewMode === 'graph' && <AgentActivityBoard />}
         </div>
 
         {/* Right Resizer */}
-        <div 
+        {!isNarrow && <div 
           className="w-1 cursor-col-resize hover:bg-purple-500 bg-gray-800/50 transition-colors z-10" 
           onMouseDown={handleRightDrag}
-        />
+        />}
 
         {/* Right: inspector */}
-        <div style={{ width: rightWidth }} className="flex-shrink-0 overflow-y-auto bg-gray-950">
+        <div
+          style={isNarrow ? undefined : { width: rightWidth }}
+          className={`${isNarrow ? 'h-[520px] border-t' : 'flex-shrink-0 overflow-y-auto'} border-slate-800 bg-slate-950`}
+        >
           {selectedAgent ? (
             <AgentInspector />
           ) : selectedKami ? (

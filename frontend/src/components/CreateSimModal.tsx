@@ -3,19 +3,22 @@ import { useSimStore } from '../stores/simStore'
 
 export default function CreateSimModal() {
   const { openCreateModal, createSim } = useSimStore()
+  const [name, setName] = useState('')
   const [prompt, setPrompt] = useState('')
   const [count, setCount] = useState(10)
   const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setLoading(true)
+    setError(null)
     try {
-      await createSim(prompt, count)
+      await createSim(prompt, count, name.trim() || undefined)
       openCreateModal(false)
     } catch (e) {
       console.error(e)
-      alert("Failed to build world. See console for details.")
+      setError(e instanceof Error ? e.message : 'Failed to build world.')
     } finally {
       setLoading(false)
     }
@@ -38,8 +41,22 @@ export default function CreateSimModal() {
           </div>
         ) : (
           <form onSubmit={handleSubmit} className="space-y-4">
+            {error && (
+              <div className="rounded border border-rose-700 bg-rose-950/40 px-3 py-2 text-sm text-rose-200">
+                {error}
+              </div>
+            )}
             <div>
-              <label className="block text-sm font-medium text-gray-400 mb-1">Town Description</label>
+              <label className="block text-sm font-medium text-gray-400 mb-1">World Name</label>
+              <input
+                className="w-full bg-gray-900 border border-gray-700 rounded p-2 text-gray-100 focus:outline-none focus:border-indigo-500"
+                placeholder="ISS tension study"
+                value={name}
+                onChange={e => setName(e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-400 mb-1">World Prompt</label>
               <textarea 
                 className="w-full bg-gray-900 border border-gray-700 rounded p-2 text-gray-100 focus:outline-none focus:border-indigo-500 h-24"
                 placeholder="A small fishing village in Norway..."

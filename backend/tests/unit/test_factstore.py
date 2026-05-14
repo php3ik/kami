@@ -205,3 +205,60 @@ class TestAgentBeliefs:
         beliefs = fs.get_beliefs(session, "agent_1")
         assert len(beliefs) == 1
         assert beliefs[0].believed_value == "kami_1"
+
+
+class TestLivenessState:
+    def test_agent_needs_are_temporal_and_clamped(self, session, world):
+        fs.set_agent_need(session, "agent_1", "stress", 0.4, tick=1)
+        fs.set_agent_need(session, "agent_1", "stress", 1.4, tick=2)
+        session.commit()
+
+        needs = fs.get_agent_needs(session, "agent_1")
+        assert needs["stress"] == 1.0
+
+    def test_intent_record_can_be_settled_by_event(self, session, world):
+        intent = fs.record_agent_intent(
+            session,
+            tick=3,
+            agent_id="agent_1",
+            kami_id="kami_1",
+            action_type="talk",
+            target="agent_2",
+            params={"utterance": "Can you check this?"},
+        )
+        event = fs.emit_event(
+            session,
+            tick=3,
+            kami_id="kami_1",
+            event_type="conversation",
+            participants=["agent_1"],
+            narrative="The request lands and changes the room.",
+        )
+        fs.settle_tick_intents(
+            session,
+            tick=3,
+            event_id=event.event_id,
+            participants=event.participants,
+            narrative=event.narrative,
+        )
+        session.commit()
+
+        assert session.get(fs.AgentIntentRecord, intent.intent_id).status == "resolved"
+
+    def test_conversation_thread_upsert(self, session, world):
+        thread = fs.upsert_conversation_thread(
+            session,
+            tick=4,
+            kami_id="kami_1",
+            participants=["agent_1", "agent_2"],
+            topic="sample anomaly",
+            summary="They disagree about whether the anomaly is procedural.",
+            tension=0.6,
+            momentum=0.7,
+            open_question="Who touched the glovebox last?",
+        )
+        session.commit()
+
+        threads = fs.get_active_conversations(session, agent_id="agent_1")
+        assert threads[0].thread_id == thread.thread_id
+        assert threads[0].tension == 0.6

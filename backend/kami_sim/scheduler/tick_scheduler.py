@@ -149,7 +149,36 @@ class TickScheduler:
         agent_results = await asyncio.gather(*agent_coros)
 
         for kami_id, agent_id, result in agent_results:
-            all_intents[kami_id].extend(result.get("intents", []))
+            enriched_intents = []
+            fs.advance_agent_needs(session, agent_id, tick)
+            for intent in result.get("intents", []):
+                try:
+                    intent["target"] = self._resolve_intent_target(
+                        session,
+                        kami_id=kami_id,
+                        raw_target=intent.get("target", ""),
+                    )
+                    pressure = {
+                        "goal": intent.get("goal", ""),
+                        "expected_outcome": intent.get("expected_outcome", ""),
+                        "exit_condition": intent.get("exit_condition", ""),
+                    }
+                    record = fs.record_agent_intent(
+                        session,
+                        tick=tick,
+                        agent_id=agent_id,
+                        kami_id=kami_id,
+                        action_type=intent.get("action_type", "wait"),
+                        target=intent.get("target", ""),
+                        params=intent.get("params", {}),
+                        salience=intent.get("salience", 0.3),
+                        pressure=pressure,
+                    )
+                    intent["intent_id"] = record.intent_id
+                except Exception as e:
+                    logger.warning(f"Intent record failed: {e}")
+                enriched_intents.append(intent)
+            all_intents[kami_id].extend(enriched_intents)
             all_monologues[agent_id] = result.get("inner_monologue", "")
 
             # Apply belief updates
@@ -228,3 +257,43 @@ class TickScheduler:
             "narratives": narratives,
             "monologues": all_monologues,
         }
+
+    def _resolve_intent_target(
+        self,
+        session: Session,
+        kami_id: str,
+        raw_target: str | None,
+    ) -> str:
+        """Normalize obvious target names to canonical entity/kami IDs.
+
+        Agents are instructed to use IDs, but LLMs occasionally return a visible
+        name. We accept exact visible names while leaving ambiguous descriptions
+        for the kami guardrails to block.
+        """
+        target = (raw_target or "").strip()
+        if not target:
+            return ""
+        if session.get(fs.Entity, target) is not None:
+            return target
+        if target in self.spatial_graph.get_neighbors(kami_id):
+            return target
+
+        target_key = target.casefold()
+        visible = fs.get_entities_in_kami(session, kami_id)
+        matches = [
+            entity.entity_id
+            for entity in visible
+            if entity.canonical_name.casefold() == target_key
+        ]
+        if len(matches) == 1:
+            return matches[0]
+
+        neighbors = self.spatial_graph.get_neighbors(kami_id)
+        neighbor_matches = []
+        for neighbor_id in neighbors:
+            entity = session.get(fs.Entity, neighbor_id)
+            if entity and entity.canonical_name.casefold() == target_key:
+                neighbor_matches.append(neighbor_id)
+        if len(neighbor_matches) == 1:
+            return neighbor_matches[0]
+        return target

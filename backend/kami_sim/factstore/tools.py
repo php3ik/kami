@@ -14,7 +14,10 @@ from sqlalchemy.orm import Session
 from .models import (
     VALID_ATTRIBUTES,
     VALID_REL_TYPES,
+    AgentIntentRecord,
     AgentBelief,
+    AgentNeed,
+    ConversationThread,
     Entity,
     Event,
     Location,
@@ -492,6 +495,230 @@ def get_beliefs(
     if kind:
         q = q.filter(AgentBelief.kind == kind)
     return q.all()
+
+
+# --- Embodiment, intent memory, and live scenes ---
+
+
+DEFAULT_NEEDS = {
+    "fatigue": 0.0,
+    "hunger": 0.0,
+    "stress": 0.15,
+    "social": 0.35,
+    "task_pressure": 0.4,
+}
+
+
+def set_agent_need(
+    session: Session,
+    agent_id: str,
+    need: str,
+    value: float,
+    tick: int,
+) -> AgentNeed:
+    if session.get(Entity, agent_id) is None:
+        raise ValueError(f"Agent {agent_id} not found")
+    value = max(0.0, min(1.0, float(value)))
+    existing = (
+        session.query(AgentNeed)
+        .filter(
+            AgentNeed.agent_id == agent_id,
+            AgentNeed.need == need,
+            AgentNeed.valid_until_tick.is_(None),
+        )
+        .first()
+    )
+    if existing:
+        existing.valid_until_tick = tick
+    row = AgentNeed(agent_id=agent_id, need=need, value=value, since_tick=tick)
+    session.add(row)
+    session.flush()
+    return row
+
+
+def get_agent_needs(session: Session, agent_id: str) -> dict[str, float]:
+    rows = (
+        session.query(AgentNeed)
+        .filter(AgentNeed.agent_id == agent_id, AgentNeed.valid_until_tick.is_(None))
+        .all()
+    )
+    values = dict(DEFAULT_NEEDS)
+    values.update({row.need: row.value for row in rows})
+    return values
+
+
+def advance_agent_needs(
+    session: Session,
+    agent_id: str,
+    tick: int,
+    deltas: dict[str, float] | None = None,
+) -> dict[str, float]:
+    values = get_agent_needs(session, agent_id)
+    baseline = {
+        "fatigue": 0.015,
+        "hunger": 0.008,
+        "stress": 0.0,
+        "social": 0.002,
+        "task_pressure": 0.004,
+    }
+    if deltas:
+        baseline.update({k: baseline.get(k, 0.0) + float(v) for k, v in deltas.items()})
+    for need, delta in baseline.items():
+        set_agent_need(session, agent_id, need, values.get(need, 0.0) + delta, tick)
+    return get_agent_needs(session, agent_id)
+
+
+def record_agent_intent(
+    session: Session,
+    tick: int,
+    agent_id: str,
+    kami_id: str | None,
+    action_type: str,
+    target: str | None = None,
+    params: dict | None = None,
+    salience: float = 0.3,
+    intent_id: str | None = None,
+    pressure: dict | None = None,
+) -> AgentIntentRecord:
+    if session.get(Entity, agent_id) is None:
+        raise ValueError(f"Agent {agent_id} not found")
+    row = AgentIntentRecord(
+        intent_id=intent_id or _gen_id("int_"),
+        tick=tick,
+        agent_id=agent_id,
+        kami_id=kami_id,
+        action_type=action_type,
+        target=target,
+        params=params or {},
+        salience=float(salience),
+        pressure=pressure or {},
+    )
+    session.add(row)
+    session.flush()
+    return row
+
+
+def get_recent_intents(
+    session: Session,
+    agent_id: str | None = None,
+    kami_id: str | None = None,
+    limit: int = 8,
+) -> list[AgentIntentRecord]:
+    q = session.query(AgentIntentRecord)
+    if agent_id:
+        q = q.filter(AgentIntentRecord.agent_id == agent_id)
+    if kami_id:
+        q = q.filter(AgentIntentRecord.kami_id == kami_id)
+    return q.order_by(AgentIntentRecord.tick.desc()).limit(limit).all()
+
+
+def mark_intent_result(
+    session: Session,
+    intent_id: str,
+    status: str,
+    result_summary: str = "",
+    result_event_id: str | None = None,
+    blockers: list | None = None,
+) -> AgentIntentRecord | None:
+    row = session.get(AgentIntentRecord, intent_id)
+    if not row:
+        return None
+    row.status = status
+    row.result_summary = result_summary
+    row.result_event_id = result_event_id
+    row.blockers = blockers or []
+    session.flush()
+    return row
+
+
+def settle_tick_intents(
+    session: Session,
+    tick: int,
+    event_id: str,
+    participants: list[str],
+    narrative: str,
+) -> None:
+    rows = session.query(AgentIntentRecord).filter(AgentIntentRecord.tick == tick).all()
+    participant_set = set(participants or [])
+    for row in rows:
+        if row.status != "pending":
+            continue
+        if row.agent_id in participant_set:
+            row.status = "resolved"
+            row.result_event_id = event_id
+            row.result_summary = narrative[:500]
+        else:
+            row.status = "stalled"
+            row.result_summary = "No visible outcome this tick."
+    session.flush()
+
+
+def upsert_conversation_thread(
+    session: Session,
+    tick: int,
+    kami_id: str | None,
+    participants: list[str],
+    topic: str,
+    summary: str,
+    status: str = "active",
+    tension: float = 0.0,
+    momentum: float = 0.5,
+    open_question: str | None = None,
+    thread_id: str | None = None,
+    last_event_id: str | None = None,
+) -> ConversationThread:
+    row = session.get(ConversationThread, thread_id) if thread_id else None
+    if row is None:
+        participant_set = set(participants or [])
+        active = (
+            session.query(ConversationThread)
+            .filter(
+                ConversationThread.kami_id == kami_id,
+                ConversationThread.status == "active",
+            )
+            .all()
+        )
+        for candidate in active:
+            if set(candidate.participants or []) == participant_set:
+                row = candidate
+                break
+    if row is None:
+        row = ConversationThread(
+            thread_id=thread_id or _gen_id("thr_"),
+            kami_id=kami_id,
+            participants=participants or [],
+            topic=topic or "unfinished exchange",
+            created_at_tick=tick,
+        )
+        session.add(row)
+
+    row.kami_id = kami_id
+    row.participants = participants or row.participants or []
+    row.topic = topic or row.topic
+    row.status = status
+    row.tension = max(0.0, min(1.0, float(tension)))
+    row.momentum = max(0.0, min(1.0, float(momentum)))
+    row.summary = summary or row.summary
+    row.open_question = open_question
+    row.last_tick = tick
+    row.last_event_id = last_event_id or row.last_event_id
+    session.flush()
+    return row
+
+
+def get_active_conversations(
+    session: Session,
+    kami_id: str | None = None,
+    agent_id: str | None = None,
+    limit: int = 5,
+) -> list[ConversationThread]:
+    q = session.query(ConversationThread).filter(ConversationThread.status == "active")
+    if kami_id:
+        q = q.filter(ConversationThread.kami_id == kami_id)
+    rows = q.order_by(ConversationThread.last_tick.desc()).limit(limit * 3).all()
+    if agent_id:
+        rows = [row for row in rows if agent_id in (row.participants or [])]
+    return rows[:limit]
 
 
 # --- Schedules ---

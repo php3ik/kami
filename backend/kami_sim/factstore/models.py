@@ -196,6 +196,74 @@ class AgentBelief(Base):
     )
 
 
+class AgentIntentRecord(Base):
+    """Durable record of what an agent tried to do and how the world answered."""
+
+    __tablename__ = "agent_intents"
+
+    intent_id = Column(String, primary_key=True)
+    tick = Column(Integer, nullable=False)
+    agent_id = Column(String, ForeignKey("entities.entity_id"), nullable=False)
+    kami_id = Column(String, ForeignKey("entities.entity_id"), nullable=True)
+    action_type = Column(String, nullable=False)
+    target = Column(String, nullable=True)
+    params = Column(JSON, default=dict)
+    salience = Column(Float, default=0.3)
+    status = Column(String, nullable=False, default="pending")
+    result_event_id = Column(String, ForeignKey("events.event_id"), nullable=True)
+    result_summary = Column(Text, default="")
+    blockers = Column(JSON, default=list)
+    pressure = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_agent_intents_agent_tick", "agent_id", "tick"),
+        Index("ix_agent_intents_kami_tick", "kami_id", "tick"),
+        Index("ix_agent_intents_status", "status"),
+    )
+
+
+class ConversationThread(Base):
+    """A living social thread that can carry momentum across ticks."""
+
+    __tablename__ = "conversation_threads"
+
+    thread_id = Column(String, primary_key=True)
+    kami_id = Column(String, ForeignKey("entities.entity_id"), nullable=True)
+    participants = Column(JSON, default=list)
+    topic = Column(String, nullable=False)
+    status = Column(String, nullable=False, default="active")
+    tension = Column(Float, default=0.0)
+    momentum = Column(Float, default=0.5)
+    last_event_id = Column(String, ForeignKey("events.event_id"), nullable=True)
+    last_tick = Column(Integer, nullable=False, default=0)
+    summary = Column(Text, default="")
+    open_question = Column(Text, nullable=True)
+    created_at_tick = Column(Integer, nullable=False, default=0)
+
+    __table_args__ = (
+        Index("ix_threads_kami_status", "kami_id", "status"),
+        Index("ix_threads_last_tick", "last_tick"),
+    )
+
+
+class AgentNeed(Base):
+    """Temporal scalar needs used to keep agents embodied and non-static."""
+
+    __tablename__ = "agent_needs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    agent_id = Column(String, ForeignKey("entities.entity_id"), nullable=False)
+    need = Column(String, nullable=False)
+    value = Column(Float, nullable=False, default=0.0)
+    since_tick = Column(Integer, nullable=False)
+    valid_until_tick = Column(Integer, nullable=True)
+
+    __table_args__ = (
+        Index("ix_agent_needs_current", "agent_id", "need", "valid_until_tick"),
+    )
+
+
 class Schedule(Base):
     """Pre-planned events."""
 

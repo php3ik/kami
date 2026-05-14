@@ -40,6 +40,59 @@ export async function fetchEvents(params: {
   return res.json()
 }
 
+async function parseResponse(res: Response) {
+  const text = await res.text()
+  let data: any = {}
+  try {
+    data = text ? JSON.parse(text) : {}
+  } catch {
+    data = { error: text || res.statusText }
+  }
+  if (!res.ok || data?.error) {
+    const detail =
+      typeof data?.detail === 'string'
+        ? data.detail
+        : data?.detail
+          ? JSON.stringify(data.detail)
+          : ''
+    throw new Error(data?.error || detail || res.statusText)
+  }
+  return data
+}
+
+export async function fetchSimulations() {
+  const res = await fetch(`${API_BASE}/simulations`)
+  return parseResponse(res)
+}
+
+export async function switchSimulation(id: string) {
+  const res = await fetch(`${API_BASE}/simulations/${id}/switch`, { method: 'POST' })
+  return parseResponse(res)
+}
+
+export async function deleteSimulation(id: string) {
+  const res = await fetch(`${API_BASE}/simulations/${id}`, { method: 'DELETE' })
+  return parseResponse(res)
+}
+
+export async function fetchTimeline(params: {
+  mode: 'agents' | 'kami'
+  since_tick?: number
+  until_tick?: number
+}) {
+  const query = new URLSearchParams()
+  query.set('mode', params.mode)
+  if (params.since_tick !== undefined) query.set('since_tick', String(params.since_tick))
+  if (params.until_tick !== undefined) query.set('until_tick', String(params.until_tick))
+  const res = await fetch(`${API_BASE}/timeline?${query}`)
+  return res.json()
+}
+
+export async function fetchTimelineSnapshot(kind: 'agent' | 'kami', id: string, tick: number) {
+  const res = await fetch(`${API_BASE}/timeline/snapshot/${kind}/${id}?tick=${tick}`)
+  return res.json()
+}
+
 export async function stepTick(ticks = 1) {
   const res = await fetch(`${API_BASE}/sim/step?ticks=${ticks}`, { method: 'POST' })
   return res.json()
@@ -50,13 +103,13 @@ export async function startRun(ticks = 100) {
   return res.json()
 }
 
-export async function createSim(prompt: string, count: number) {
+export async function createSim(prompt: string, count: number, name?: string) {
   const res = await fetch(`${API_BASE}/sim/create`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompt, agent_count: count })
+    body: JSON.stringify({ prompt, agent_count: count, name })
   })
-  return res.json()
+  return parseResponse(res)
 }
 
 export async function pauseSim() {

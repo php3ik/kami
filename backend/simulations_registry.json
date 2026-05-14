@@ -1,0 +1,375 @@
+{
+  "active_id": "94967d0c2f",
+  "simulations": [
+    {
+      "id": "cca6547a28",
+      "name": "табір пластунів біля села Орів generated",
+      "prompt": "табір пластунів біля села Орів, табір юнацького куреню номер 75 ім героїв бою під Крутами, два виховники старшопластуни і решта юнаки. намети, лятрина, кухня, щогла, брама, ватра, все як має бути на пластовому таборі",
+      "db_url": "sqlite:///./kami_sim.db",
+      "db_path": "kami_sim.db",
+      "graph_path": null,
+      "graph_data": {
+        "nodes": [
+          {
+            "id": "sim_cca6547a28__kami_brama_taboru",
+            "name": "Брама табору куреню 75",
+            "kind": "public_outdoor"
+          },
+          {
+            "id": "sim_cca6547a28__kami_tsentralna_haliavyna",
+            "name": "Центральна галявина",
+            "kind": "public_outdoor"
+          },
+          {
+            "id": "sim_cca6547a28__kami_shchohla_prapora",
+            "name": "Щогла з прапором",
+            "kind": "institutional"
+          },
+          {
+            "id": "sim_cca6547a28__kami_shtabnyi_namet",
+            "name": "Штабний намет виховників",
+            "kind": "institutional"
+          },
+          {
+            "id": "sim_cca6547a28__kami_namet_yunakiv_kruty",
+            "name": "Намет юнаків «Крути»",
+            "kind": "residential"
+          },
+          {
+            "id": "sim_cca6547a28__kami_namet_yunakiv_oriv",
+            "name": "Намет юнаків «Орів»",
+            "kind": "residential"
+          },
+          {
+            "id": "sim_cca6547a28__kami_kukhnia_pid_tentom",
+            "name": "Кухня під тентом",
+            "kind": "utility"
+          },
+          {
+            "id": "sim_cca6547a28__kami_sklad_drov",
+            "name": "Склад дров під смерекою",
+            "kind": "utility"
+          },
+          {
+            "id": "sim_cca6547a28__kami_liatryna_lisova",
+            "name": "Лісова лятрина",
+            "kind": "utility"
+          },
+          {
+            "id": "sim_cca6547a28__kami_vatra_kolo",
+            "name": "Ватрове коло",
+            "kind": "public_outdoor"
+          },
+          {
+            "id": "sim_cca6547a28__kami_stezhka_do_dzherela",
+            "name": "Стежка до джерела",
+            "kind": "transit"
+          },
+          {
+            "id": "sim_cca6547a28__kami_dzherelo_orivske",
+            "name": "Орівське джерело",
+            "kind": "nature"
+          },
+          {
+            "id": "sim_cca6547a28__kami_doroha_do_orova",
+            "name": "Грунтова дорога до села Орів",
+            "kind": "transit"
+          },
+          {
+            "id": "sim_cca6547a28__kami_lisova_varта",
+            "name": "Пост лісової варти",
+            "kind": "public_outdoor"
+          }
+        ],
+        "edges": [
+          {
+            "source": "sim_cca6547a28__kami_brama_taboru",
+            "target": "sim_cca6547a28__kami_doroha_do_orova",
+            "edge_type": "adjacent",
+            "visual_attenuation": 0.1,
+            "audio_attenuation": 0.2
+          },
+          {
+            "source": "sim_cca6547a28__kami_brama_taboru",
+            "target": "sim_cca6547a28__kami_lisova_varта",
+            "edge_type": "adjacent",
+            "visual_attenuation": 0.15,
+            "audio_attenuation": 0.25
+          },
+          {
+            "source": "sim_cca6547a28__kami_brama_taboru",
+            "target": "sim_cca6547a28__kami_tsentralna_haliavyna",
+            "edge_type": "adjacent",
+            "visual_attenuation": 0.2,
+            "audio_attenuation": 0.3
+          },
+          {
+            "source": "sim_cca6547a28__kami_tsentralna_haliavyna",
+            "target": "sim_cca6547a28__kami_shchohla_prapora",
+            "edge_type": "adjacent",
+            "visual_attenuation": 0.05,
+            "audio_attenuation": 0.1
+          },
+          {
+            "source": "sim_cca6547a28__kami_tsentralna_haliavyna",
+            "target": "sim_cca6547a28__kami_shtabnyi_namet",
+            "edge_type": "adjacent",
+            "visual_attenuation": 0.2,
+            "audio_attenuation": 0.25
+          },
+          {
+            "source": "sim_cca6547a28__kami_tsentralna_haliavyna",
+            "target": "sim_cca6547a28__kami_namet_yunakiv_kruty",
+            "edge_type": "adjacent",
+            "visual_attenuation": 0.25,
+            "audio_attenuation": 0.35
+          },
+          {
+            "source": "sim_cca6547a28__kami_tsentralna_haliavyna",
+            "target": "sim_cca6547a28__kami_kukhnia_pid_tentom",
+            "edge_type": "adjacent",
+            "visual_attenuation": 0.15,
+            "audio_attenuation": 0.2
+          },
+          {
+            "source": "sim_cca6547a28__kami_tsentralna_haliavyna",
+            "target": "sim_cca6547a28__kami_vatra_kolo",
+            "edge_type": "adjacent",
+            "visual_attenuation": 0.3,
+            "audio_attenuation": 0.4
+          },
+          {
+            "source": "sim_cca6547a28__kami_tsentralna_haliavyna",
+            "target": "sim_cca6547a28__kami_lisova_varта",
+            "edge_type": "adjacent",
+            "visual_attenuation": 0.3,
+            "audio_attenuation": 0.4
+          },
+          {
+            "source": "sim_cca6547a28__kami_namet_yunakiv_kruty",
+            "target": "sim_cca6547a28__kami_namet_yunakiv_oriv",
+            "edge_type": "adjacent",
+            "visual_attenuation": 0.2,
+            "audio_attenuation": 0.25
+          },
+          {
+            "source": "sim_cca6547a28__kami_namet_yunakiv_oriv",
+            "target": "sim_cca6547a28__kami_liatryna_lisova",
+            "edge_type": "adjacent",
+            "visual_attenuation": 0.45,
+            "audio_attenuation": 0.55
+          },
+          {
+            "source": "sim_cca6547a28__kami_kukhnia_pid_tentom",
+            "target": "sim_cca6547a28__kami_sklad_drov",
+            "edge_type": "adjacent",
+            "visual_attenuation": 0.2,
+            "audio_attenuation": 0.3
+          },
+          {
+            "source": "sim_cca6547a28__kami_kukhnia_pid_tentom",
+            "target": "sim_cca6547a28__kami_stezhka_do_dzherela",
+            "edge_type": "adjacent",
+            "visual_attenuation": 0.25,
+            "audio_attenuation": 0.35
+          },
+          {
+            "source": "sim_cca6547a28__kami_sklad_drov",
+            "target": "sim_cca6547a28__kami_vatra_kolo",
+            "edge_type": "adjacent",
+            "visual_attenuation": 0.35,
+            "audio_attenuation": 0.45
+          },
+          {
+            "source": "sim_cca6547a28__kami_stezhka_do_dzherela",
+            "target": "sim_cca6547a28__kami_dzherelo_orivske",
+            "edge_type": "adjacent",
+            "visual_attenuation": 0.4,
+            "audio_attenuation": 0.5
+          }
+        ]
+      },
+      "created_at": "2026-05-14T01:10:01.056551+00:00",
+      "updated_at": "2026-05-14T13:53:40.840375+00:00",
+      "total_cost_usd": 1.764129
+    },
+    {
+      "id": "94967d0c2f",
+      "name": "МКС",
+      "prompt": "повна модель міжнародної космічної станції з усіма житловими, дослідницькими, сервісними, транспортними модулями, та можливістю виходу у відкритий космос (як окрему локацію)ю екіпаж з 7 астронавтів серед яких астронавт-українець що підозрює що він і вся команда знаходяться у симуляції і планує це обговорити з командою",
+      "db_url": "sqlite:///./kami_sim.db",
+      "db_path": "kami_sim.db",
+      "graph_path": null,
+      "graph_data": {
+        "nodes": [
+          {
+            "id": "sim_94967d0c2f__kami_harmony_node_2",
+            "name": "Вузол Harmony",
+            "kind": "transit"
+          },
+          {
+            "id": "sim_94967d0c2f__kami_destiny_laboratory",
+            "name": "Лабораторія Destiny",
+            "kind": "institutional"
+          },
+          {
+            "id": "sim_94967d0c2f__kami_quest_airlock",
+            "name": "Шлюз Quest",
+            "kind": "utility"
+          },
+          {
+            "id": "sim_94967d0c2f__kami_cupola_observation",
+            "name": "Купол Cupola",
+            "kind": "public_indoor"
+          },
+          {
+            "id": "sim_94967d0c2f__kami_tranquility_life_support",
+            "name": "Модуль Tranquility з системами життєзабезпечення",
+            "kind": "utility"
+          },
+          {
+            "id": "sim_94967d0c2f__kami_crew_quarters",
+            "name": "Житлові каюти екіпажу",
+            "kind": "residential"
+          },
+          {
+            "id": "sim_94967d0c2f__kami_galley_table",
+            "name": "Стіл-камбуз екіпажу",
+            "kind": "public_indoor"
+          },
+          {
+            "id": "sim_94967d0c2f__kami_zvezda_service_module",
+            "name": "Сервісний модуль Zvezda",
+            "kind": "residential"
+          },
+          {
+            "id": "sim_94967d0c2f__kami_zarya_cargo_module",
+            "name": "Вантажний модуль Zarya",
+            "kind": "industrial"
+          },
+          {
+            "id": "sim_94967d0c2f__kami_kibo_laboratory",
+            "name": "Японська лабораторія Kibo",
+            "kind": "institutional"
+          },
+          {
+            "id": "sim_94967d0c2f__kami_columbus_laboratory",
+            "name": "Європейська лабораторія Columbus",
+            "kind": "institutional"
+          },
+          {
+            "id": "sim_94967d0c2f__kami_poisk_docking_compartment",
+            "name": "Стикувальний відсік Poisk",
+            "kind": "transit"
+          },
+          {
+            "id": "sim_94967d0c2f__kami_soyuz_transport",
+            "name": "Пристикований транспортний корабель Soyuz",
+            "kind": "transit"
+          },
+          {
+            "id": "sim_94967d0c2f__kami_external_truss_eva",
+            "name": "Зовнішня ферма та відкритий космос",
+            "kind": "public_outdoor"
+          }
+        ],
+        "edges": [
+          {
+            "source": "sim_94967d0c2f__kami_harmony_node_2",
+            "target": "sim_94967d0c2f__kami_destiny_laboratory",
+            "edge_type": "adjacent",
+            "visual_attenuation": 0.25,
+            "audio_attenuation": 0.35
+          },
+          {
+            "source": "sim_94967d0c2f__kami_destiny_laboratory",
+            "target": "sim_94967d0c2f__kami_quest_airlock",
+            "edge_type": "adjacent",
+            "visual_attenuation": 0.25,
+            "audio_attenuation": 0.35
+          },
+          {
+            "source": "sim_94967d0c2f__kami_quest_airlock",
+            "target": "sim_94967d0c2f__kami_cupola_observation",
+            "edge_type": "adjacent",
+            "visual_attenuation": 0.25,
+            "audio_attenuation": 0.35
+          },
+          {
+            "source": "sim_94967d0c2f__kami_cupola_observation",
+            "target": "sim_94967d0c2f__kami_tranquility_life_support",
+            "edge_type": "adjacent",
+            "visual_attenuation": 0.25,
+            "audio_attenuation": 0.35
+          },
+          {
+            "source": "sim_94967d0c2f__kami_tranquility_life_support",
+            "target": "sim_94967d0c2f__kami_crew_quarters",
+            "edge_type": "adjacent",
+            "visual_attenuation": 0.25,
+            "audio_attenuation": 0.35
+          },
+          {
+            "source": "sim_94967d0c2f__kami_crew_quarters",
+            "target": "sim_94967d0c2f__kami_galley_table",
+            "edge_type": "adjacent",
+            "visual_attenuation": 0.25,
+            "audio_attenuation": 0.35
+          },
+          {
+            "source": "sim_94967d0c2f__kami_galley_table",
+            "target": "sim_94967d0c2f__kami_zvezda_service_module",
+            "edge_type": "adjacent",
+            "visual_attenuation": 0.25,
+            "audio_attenuation": 0.35
+          },
+          {
+            "source": "sim_94967d0c2f__kami_zvezda_service_module",
+            "target": "sim_94967d0c2f__kami_zarya_cargo_module",
+            "edge_type": "adjacent",
+            "visual_attenuation": 0.25,
+            "audio_attenuation": 0.35
+          },
+          {
+            "source": "sim_94967d0c2f__kami_zarya_cargo_module",
+            "target": "sim_94967d0c2f__kami_kibo_laboratory",
+            "edge_type": "adjacent",
+            "visual_attenuation": 0.25,
+            "audio_attenuation": 0.35
+          },
+          {
+            "source": "sim_94967d0c2f__kami_kibo_laboratory",
+            "target": "sim_94967d0c2f__kami_columbus_laboratory",
+            "edge_type": "adjacent",
+            "visual_attenuation": 0.25,
+            "audio_attenuation": 0.35
+          },
+          {
+            "source": "sim_94967d0c2f__kami_columbus_laboratory",
+            "target": "sim_94967d0c2f__kami_poisk_docking_compartment",
+            "edge_type": "adjacent",
+            "visual_attenuation": 0.25,
+            "audio_attenuation": 0.35
+          },
+          {
+            "source": "sim_94967d0c2f__kami_poisk_docking_compartment",
+            "target": "sim_94967d0c2f__kami_soyuz_transport",
+            "edge_type": "adjacent",
+            "visual_attenuation": 0.25,
+            "audio_attenuation": 0.35
+          },
+          {
+            "source": "sim_94967d0c2f__kami_soyuz_transport",
+            "target": "sim_94967d0c2f__kami_external_truss_eva",
+            "edge_type": "adjacent",
+            "visual_attenuation": 0.25,
+            "audio_attenuation": 0.35
+          }
+        ]
+      },
+      "created_at": "2026-05-14T14:09:28.274090+00:00",
+      "updated_at": "2026-05-14T14:16:45.882195+00:00",
+      "total_cost_usd": 0.24498
+    }
+  ]
+}

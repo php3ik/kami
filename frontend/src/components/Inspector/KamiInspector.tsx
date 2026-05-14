@@ -1,99 +1,142 @@
+import { Box, Map, Radio, Users } from 'lucide-react'
 import { useSimStore } from '../../stores/simStore'
+import { kindLabel } from '../../utils/simView'
 
 export default function KamiInspector() {
-  const { kamiDetail, selectAgent } = useSimStore()
+  const { kamiDetail, selectAgent, selectionLoading, selectionError } = useSimStore()
 
   if (!kamiDetail) {
-    return <div className="p-4 text-gray-500 text-sm">Select a kami to inspect</div>
+    return <div className="p-4 text-slate-500 text-sm">Select a kami to inspect</div>
+  }
+  if (selectionError || kamiDetail.error) {
+    return (
+      <div className="h-full bg-slate-950 p-4 text-sm">
+        <div className="rounded border border-rose-800 bg-rose-950/30 p-4 text-rose-200">
+          <div className="font-semibold text-slate-100">Could not load kami</div>
+          <div className="mt-2 leading-relaxed">{selectionError || kamiDetail.error}</div>
+        </div>
+      </div>
+    )
   }
 
-  const agents = kamiDetail.entities?.filter((e: any) => e.kind === 'agent') || []
-  const objects = kamiDetail.entities?.filter((e: any) => e.kind === 'object') || []
+  const agents = kamiDetail.entities?.filter((entity: any) => entity.kind === 'agent') || []
+  const objects = kamiDetail.entities?.filter((entity: any) => entity.kind === 'object') || []
   const events = kamiDetail.recent_events || []
+  const kind = kamiDetail.archetype?.kind || kamiDetail.archetype?.kami_kind || 'location'
 
   return (
-    <div className="p-3 space-y-4 text-sm overflow-y-auto">
-      <div>
-        <h3 className="text-lg font-bold text-white">{kamiDetail.name || kamiDetail.kami_id}</h3>
-        <p className="text-gray-400">ID: {kamiDetail.kami_id}</p>
-        <p className="text-gray-400">Entities: {kamiDetail.entity_count}</p>
-      </div>
-
-      {kamiDetail.archetype && Object.keys(kamiDetail.archetype).length > 0 && (
-        <div>
-          <h4 className="font-semibold text-gray-300 mb-1">Properties</h4>
-          <ul className="text-gray-400 list-disc list-inside">
-            {Object.entries(kamiDetail.archetype).map(([k, v]) => (
-              <li key={k}>{k}: {String(v)}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      {kamiDetail.states && Object.keys(kamiDetail.states).length > 0 && (
-        <div>
-          <h4 className="font-semibold text-gray-300 mb-1">States</h4>
-          <ul className="text-gray-400 list-disc list-inside">
-            {Object.entries(kamiDetail.states).map(([k, v]) => (
-              <li key={k}>{k}: {String(v)}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      {agents.length > 0 && (
-        <div>
-          <h4 className="font-semibold text-gray-300 mb-1">Agents Present</h4>
-          {agents.map((a: any) => (
-            <div
-              key={a.entity_id}
-              className="px-2 py-1 rounded cursor-pointer hover:bg-gray-800"
-              onClick={() => selectAgent(a.entity_id)}
-            >
-              <span className="text-blue-400">{a.name}</span>
-              {a.states && Object.keys(a.states).length > 0 && (
-                <span className="text-gray-500 ml-2">
-                  ({Object.entries(a.states).map(([k, v]) => `${k}=${v}`).join(', ')})
-                </span>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {objects.length > 0 && (
-        <div>
-          <h4 className="font-semibold text-gray-300 mb-1">Objects</h4>
-          {objects.map((o: any) => (
-            <div key={o.entity_id} className="px-2 py-0.5 text-gray-400">
-              <span className="font-semibold">{o.name}</span>
-              {o.states && Object.keys(o.states).length > 0 && (
-                <span className="text-gray-500 ml-2 text-xs">
-                  ({Object.entries(o.states).map(([k, v]) => `${k}=${v}`).join(', ')})
-                </span>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {events.length > 0 && (
-        <div>
-          <h4 className="font-semibold text-gray-300 mb-1">Event Logs</h4>
-          <div className="max-h-96 overflow-y-auto pr-2 space-y-2">
-            {events.map((e: any) => (
-              <div key={e.event_id} className="px-2 py-1 border-l-2 border-purple-800/50 bg-gray-900 rounded-r">
-                <div className="flex justify-between text-xs">
-                  <span className="text-yellow-500">tick {e.tick}</span>
-                  <span className="text-gray-500 font-mono">{e.event_type}</span>
-                  <span className="text-gray-600">s={e.salience?.toFixed(2)}</span>
-                </div>
-                <p className="text-gray-300 mt-1 leading-relaxed">{e.narrative}</p>
-              </div>
-            ))}
+    <div className="h-full overflow-y-auto bg-slate-950 text-sm">
+      <div className="sticky top-0 z-10 border-b border-slate-800 bg-slate-950/95 backdrop-blur p-4">
+        <div className="flex items-start gap-3">
+          <div className="h-11 w-11 rounded bg-blue-950 border border-blue-800 grid place-items-center">
+            <Map size={19} className="text-blue-200" />
+          </div>
+          <div className="min-w-0">
+            <h3 className="text-xl font-bold text-white leading-tight">{kamiDetail.name || kamiDetail.kami_id}</h3>
+            <p className="text-xs text-slate-500 mt-1">{kindLabel(kind)} · {kamiDetail.kami_id}</p>
+            {kamiDetail.snapshot_tick !== undefined && (
+              <p className="text-[11px] text-amber-300 mt-1">Snapshot at tick {kamiDetail.snapshot_tick}</p>
+            )}
           </div>
         </div>
-      )}
+        <div className="grid grid-cols-3 gap-2 mt-4">
+          <Metric label="Entities" value={kamiDetail.entity_count || 0} />
+          <Metric label="Agents" value={agents.length} />
+          <Metric label={selectionLoading || kamiDetail.loading ? 'Loading' : 'Events'} value={selectionLoading || kamiDetail.loading ? '...' : events.length} />
+        </div>
+      </div>
+
+      <div className="p-4 space-y-5">
+        {kamiDetail.archetype?.description && (
+          <section className="rounded border border-slate-800 bg-slate-900/60 p-3">
+            <h4 className="font-semibold text-slate-100 mb-2">Scene Description</h4>
+            <p className="text-slate-400 leading-relaxed">{kamiDetail.archetype.description}</p>
+          </section>
+        )}
+
+        {agents.length > 0 && (
+          <section>
+            <div className="flex items-center gap-2 mb-2">
+              <Users size={15} className="text-purple-300" />
+              <h4 className="font-semibold text-slate-100">Agents Present</h4>
+            </div>
+            <div className="space-y-2">
+              {agents.map((agent: any) => (
+                <button
+                  key={agent.entity_id}
+                  className="w-full px-3 py-2 rounded bg-slate-900/70 border border-slate-800 hover:border-purple-600 text-left transition-colors"
+                  onClick={() => selectAgent(agent.entity_id)}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-semibold text-purple-100 truncate">{agent.name}</span>
+                    <span className="text-[11px] text-slate-500">{agent.kind}</span>
+                  </div>
+                  {agent.states && Object.keys(agent.states).length > 0 && (
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {Object.entries(agent.states).map(([key, value]) => (
+                        <span key={key} className="px-1.5 py-0.5 rounded bg-slate-950 text-[11px] text-slate-400 border border-slate-800">
+                          {key}: {String(value)}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </button>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {objects.length > 0 && (
+          <section>
+            <div className="flex items-center gap-2 mb-2">
+              <Box size={15} className="text-amber-300" />
+              <h4 className="font-semibold text-slate-100">Objects</h4>
+            </div>
+            <div className="space-y-1">
+              {objects.map((object: any) => (
+                <div key={object.entity_id} className="px-3 py-2 rounded bg-slate-900/50 border border-slate-800">
+                  <div className="font-medium text-slate-200">{object.name}</div>
+                  {object.states && Object.keys(object.states).length > 0 && (
+                    <div className="mt-1 text-xs text-slate-500">
+                      {Object.entries(object.states).map(([key, value]) => `${key}: ${value}`).join(' · ')}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {events.length > 0 && (
+          <section>
+            <div className="flex items-center gap-2 mb-2">
+              <Radio size={15} className="text-emerald-300" />
+              <h4 className="font-semibold text-slate-100">Scene Event Stream</h4>
+            </div>
+            <div className="space-y-2">
+              {events.slice(0, 20).map((event: any) => (
+                <div key={event.event_id} className="px-3 py-2 border-l-2 border-blue-700 bg-slate-900/70 rounded-r">
+                  <div className="flex items-center justify-between text-[11px] mb-1">
+                    <span className="text-blue-300 font-semibold">Tick {event.tick}</span>
+                    <span className="text-slate-500">{event.event_type}</span>
+                    <span className="text-slate-600">s={event.salience?.toFixed(2)}</span>
+                  </div>
+                  <p className="text-slate-300 leading-relaxed">{event.narrative}</p>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function Metric({ label, value }: { label: string; value: number | string }) {
+  return (
+    <div className="rounded bg-slate-900 border border-slate-800 px-2 py-2">
+      <div className="text-[10px] uppercase tracking-wider text-slate-500">{label}</div>
+      <div className="text-slate-100 font-bold tabular-nums">{value}</div>
     </div>
   )
 }
