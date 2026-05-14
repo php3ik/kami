@@ -10,6 +10,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
+VALID_LLM_PROVIDERS = {"anthropic", "openai", "gemini"}
+VALID_IMAGE_PROVIDERS = {"openai", "gemini"}
+
 
 @dataclass
 class SimConfig:
@@ -49,6 +53,130 @@ class SimConfig:
     anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
     gemini_api_key: str = os.getenv("GEMINI_API_KEY", os.getenv("GOOGLE_API_KEY", ""))
+    image_provider: str = os.getenv("IMAGE_PROVIDER", os.getenv("LLM_PROVIDER", "openai"))
+    cheap_image_model: str = os.getenv("CHEAP_IMAGE_MODEL", "gpt-image-1-mini")
+    strong_image_model: str = os.getenv("STRONG_IMAGE_MODEL", "gpt-image-2")
+
+    def llm_settings(self) -> dict:
+        return {
+            "provider": self.llm_provider,
+            "cheap_model": self.cheap_model_name,
+            "strong_model": self.strong_model_name,
+            "tokens": {
+                "anthropic": _token_status(self.anthropic_api_key),
+                "openai": _token_status(self.openai_api_key),
+                "gemini": _token_status(self.gemini_api_key),
+            },
+            "image": {
+                "provider": self.image_provider,
+                "cheap_model": self.cheap_image_model,
+                "strong_model": self.strong_image_model,
+                "supported_providers": sorted(VALID_IMAGE_PROVIDERS),
+            },
+            "supported_providers": sorted(VALID_LLM_PROVIDERS),
+        }
+
+    def update_llm_settings(
+        self,
+        provider: str | None = None,
+        cheap_model: str | None = None,
+        strong_model: str | None = None,
+        anthropic_api_key: str | None = None,
+        openai_api_key: str | None = None,
+        gemini_api_key: str | None = None,
+        image_provider: str | None = None,
+        cheap_image_model: str | None = None,
+        strong_image_model: str | None = None,
+    ) -> dict:
+        updates: dict[str, str] = {}
+        if provider is not None:
+            normalized = provider.strip().lower()
+            if normalized not in VALID_LLM_PROVIDERS:
+                raise ValueError(f"Unsupported LLM provider: {provider}")
+            self.llm_provider = normalized
+            updates["LLM_PROVIDER"] = normalized
+        if cheap_model is not None:
+            value = cheap_model.strip()
+            if not value:
+                raise ValueError("Cheap model cannot be empty")
+            self.cheap_model_name = value
+            updates["CHEAP_MODEL"] = value
+        if strong_model is not None:
+            value = strong_model.strip()
+            if not value:
+                raise ValueError("Strong model cannot be empty")
+            self.strong_model_name = value
+            updates["STRONG_MODEL"] = value
+        if anthropic_api_key is not None and anthropic_api_key.strip():
+            self.anthropic_api_key = anthropic_api_key.strip()
+            updates["ANTHROPIC_API_KEY"] = self.anthropic_api_key
+        if openai_api_key is not None and openai_api_key.strip():
+            self.openai_api_key = openai_api_key.strip()
+            updates["OPENAI_API_KEY"] = self.openai_api_key
+        if gemini_api_key is not None and gemini_api_key.strip():
+            self.gemini_api_key = gemini_api_key.strip()
+            updates["GEMINI_API_KEY"] = self.gemini_api_key
+        if image_provider is not None:
+            normalized = image_provider.strip().lower()
+            if normalized not in VALID_IMAGE_PROVIDERS:
+                raise ValueError(f"Unsupported image provider: {image_provider}")
+            self.image_provider = normalized
+            updates["IMAGE_PROVIDER"] = normalized
+        if cheap_image_model is not None:
+            value = cheap_image_model.strip()
+            if not value:
+                raise ValueError("Cheap image model cannot be empty")
+            self.cheap_image_model = value
+            updates["CHEAP_IMAGE_MODEL"] = value
+        if strong_image_model is not None:
+            value = strong_image_model.strip()
+            if not value:
+                raise ValueError("Strong image model cannot be empty")
+            self.strong_image_model = value
+            updates["STRONG_IMAGE_MODEL"] = value
+        if updates:
+            _write_env_values(updates)
+            for key, value in updates.items():
+                os.environ[key] = value
+        return self.llm_settings()
+
+
+def _token_status(value: str) -> dict:
+    if not value:
+        return {"configured": False, "masked": ""}
+    if len(value) <= 10:
+        masked = "configured"
+    else:
+        masked = f"{value[:6]}...{value[-4:]}"
+    return {"configured": True, "masked": masked}
+
+
+def _quote_env(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _write_env_values(updates: dict[str, str]) -> None:
+    lines: list[str] = []
+    if ENV_PATH.exists():
+        lines = ENV_PATH.read_text(encoding="utf-8").splitlines()
+    seen: set[str] = set()
+    next_lines: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in line:
+            next_lines.append(line)
+            continue
+        key = line.split("=", 1)[0].strip()
+        if key in updates:
+            next_lines.append(f"{key}={_quote_env(updates[key])}")
+            seen.add(key)
+        else:
+            next_lines.append(line)
+    for key, value in updates.items():
+        if key not in seen:
+            next_lines.append(f"{key}={_quote_env(value)}")
+    ENV_PATH.write_text("\n".join(next_lines) + "\n", encoding="utf-8")
 
 
 # Global singleton

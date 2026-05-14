@@ -2,6 +2,7 @@ import { useMemo } from 'react'
 import { AlertTriangle, Brain, Fingerprint, HeartPulse, MapPin, Network, ScrollText, Sparkles } from 'lucide-react'
 import { useSimStore } from '../../stores/simStore'
 import { buildAgentTimeline, classifyThought, digest, getKamiName, makeKamiLookup } from '../../utils/simView'
+import EntityReferenceText from './EntityReferenceText'
 
 export default function AgentInspector() {
   const { agentDetail, graph, tickLog, selectKami, selectionLoading, selectionError } = useSimStore()
@@ -58,12 +59,12 @@ export default function AgentInspector() {
             <h4 className="font-semibold text-slate-100">Current Signal</h4>
           </div>
           <p className={`leading-relaxed ${isError ? 'text-rose-200' : 'text-slate-200'}`}>
-            {digest(latest?.thought, 360)}
+            <EntityReferenceText text={digest(latest?.thought, 360)} />
           </p>
           {latest?.narrative && (
             <div className="mt-3 border-t border-slate-800 pt-3">
               <div className="text-[11px] uppercase tracking-wider text-slate-500 mb-1">Resolved Event</div>
-              <p className="text-slate-300 leading-relaxed">{latest.narrative}</p>
+              <p className="text-slate-300 leading-relaxed"><EntityReferenceText text={latest.narrative} /></p>
             </div>
           )}
         </section>
@@ -141,12 +142,12 @@ export default function AgentInspector() {
                     </div>
                     {row.thought && (
                       <p className={`${rowError ? 'text-rose-200' : 'text-purple-100'} leading-relaxed`}>
-                        {row.thought}
+                        <EntityReferenceText text={row.thought} />
                       </p>
                     )}
                     {row.narrative && (
                       <p className="mt-2 border-t border-slate-800 pt-2 text-slate-300 leading-relaxed">
-                        {row.narrative}
+                        <EntityReferenceText text={row.narrative} />
                       </p>
                     )}
                   </div>

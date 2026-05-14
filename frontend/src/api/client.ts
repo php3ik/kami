@@ -20,6 +20,11 @@ export async function fetchAgent(agentId: string) {
   return res.json()
 }
 
+export async function fetchEntity(entityId: string) {
+  const res = await fetch(`${API_BASE}/entity/${encodeURIComponent(entityId)}`)
+  return parseResponse(res)
+}
+
 export async function fetchAgents() {
   const res = await fetch(`${API_BASE}/agents`)
   return res.json()
@@ -62,6 +67,56 @@ async function parseResponse(res: Response) {
 
 export async function fetchSimulations() {
   const res = await fetch(`${API_BASE}/simulations`)
+  return parseResponse(res)
+}
+
+export async function fetchLLMSettings() {
+  const res = await fetch(`${API_BASE}/settings/llm`)
+  return parseResponse(res)
+}
+
+export async function updateLLMSettings(payload: {
+  provider?: string
+  cheap_model?: string
+  strong_model?: string
+  image_provider?: string
+  cheap_image_model?: string
+  strong_image_model?: string
+  anthropic_api_key?: string
+  openai_api_key?: string
+  gemini_api_key?: string
+}) {
+  const res = await fetch(`${API_BASE}/settings/llm`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  return parseResponse(res)
+}
+
+export async function fetchWorldMapStyles() {
+  const res = await fetch(`${API_BASE}/world-map/styles`)
+  return parseResponse(res)
+}
+
+export async function generateWorldMap(payload: {
+  style: string
+  tier?: 'cheap' | 'strong'
+  provider?: string
+  model?: string
+  size?: string
+  quality?: string
+}) {
+  const res = await fetch(`${API_BASE}/world-map/generate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  return parseResponse(res)
+}
+
+export async function fetchLatestWorldMap() {
+  const res = await fetch(`${API_BASE}/world-map/latest`)
   return parseResponse(res)
 }
 

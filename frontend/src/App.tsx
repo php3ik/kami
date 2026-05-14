@@ -9,6 +9,7 @@ import AgentInspector from './components/Inspector/AgentInspector'
 import CreateSimModal from './components/CreateSimModal'
 import AgentActivityBoard from './components/AgentActivityBoard'
 import TimelinePreview from './components/TimelinePreview'
+import LLMSettingsModal from './components/LLMSettingsModal'
 import { GitBranch, Rows3 } from 'lucide-react'
 
 export default function App() {
@@ -18,6 +19,7 @@ export default function App() {
   const [leftWidth, setLeftWidth] = useState(280)
   const [rightWidth, setRightWidth] = useState(380)
   const [isNarrow, setIsNarrow] = useState(false)
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false)
 
   const handleLeftDrag = (e: React.MouseEvent) => {
     e.preventDefault()
@@ -80,7 +82,7 @@ export default function App() {
       <MoodStrip />
 
       {/* Time controls */}
-      <TimeControls />
+      <TimeControls onOpenSettings={() => setIsSettingsOpen(true)} />
 
       {/* Main three-column layout */}
       <div className={`flex-1 ${isNarrow ? 'flex flex-col overflow-y-auto' : 'flex overflow-hidden'}`}>
@@ -156,6 +158,7 @@ export default function App() {
         </div>
       </div>
       {isCreateModalOpen && <CreateSimModal />}
+      <LLMSettingsModal open={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
     </div>
   )
 }

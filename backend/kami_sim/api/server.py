@@ -6,8 +6,11 @@ Provides REST API and WebSocket for the frontend.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
+import math
+import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +20,7 @@ import uuid
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func
 
 from ..config import config
@@ -34,6 +38,7 @@ from ..factstore.models import (
     init_db,
 )
 from ..llm.budget import budget
+from ..llm.client import llm_client
 from ..scheduler.tick_scheduler import TickScheduler
 from ..oriv_world import build_oriv_world
 from ..spatial.graph import SpatialGraph
@@ -55,6 +60,17 @@ sim_state: dict[str, Any] = {
 ws_connections: set[WebSocket] = set()
 
 REGISTRY_PATH = Path("simulations_registry.json")
+GENERATED_ASSETS_PATH = Path("generated_assets")
+WORLD_MAP_STYLES = {
+    "realism": "photorealistic architectural top-down world map, grounded natural lighting, physical materials, believable scale",
+    "cinematic": "cinematic top-down production design map, dramatic but readable lighting, realistic textures, premium concept art",
+    "anime": "high-detail anime background art, clean linework, vibrant but readable colors, Studio-quality environment design",
+    "game": "high-end game environment map, isometric/top-down playable level art, readable paths and interiors",
+    "pixel": "detailed pixel art world map, crisp tiles, readable interior rooms, rich object detail",
+    "blueprint": "architectural blueprint mixed with realistic material callouts, precise labels avoided, clean readable plan",
+    "watercolor": "hand-painted watercolor map, delicate textures, readable top-down layout, gentle environmental atmosphere",
+    "ink": "dark ink cartography with subtle color washes, precise linework, top-down and slightly angled spatial plan",
+}
 
 
 def _now_iso() -> str:
@@ -156,6 +172,385 @@ def _record_entity_ids(record: dict, session) -> list[str]:
         .all()
     )
     return list({*(kami_ids), *(row.entity_id for row in loc_rows)})
+
+
+def _world_map_payload() -> dict:
+    registry = _read_registry()
+    active_id = sim_state.get("active_simulation_id") or registry.get("active_id")
+    record = next((item for item in registry.get("simulations", []) if item.get("id") == active_id), {})
+    graph_data = record.get("graph_data") or (sim_state["spatial_graph"].to_dict() if sim_state.get("spatial_graph") else {})
+    nodes = graph_data.get("nodes") or []
+    edges = graph_data.get("edges") or []
+    node_ids = [node.get("id") for node in nodes if node.get("id")]
+
+    session = sim_state["session_factory"]()
+    try:
+        entities = {
+            entity.entity_id: entity
+            for entity in session.query(Entity).filter(Entity.entity_id.in_(node_ids)).all()
+        }
+        object_rows = (
+            session.query(Entity, Location)
+            .join(Location, Location.entity_id == Entity.entity_id)
+            .filter(Location.valid_until_tick.is_(None))
+            .filter(Location.kami_id.in_(node_ids))
+            .filter(Entity.kind.notin_(["agent", "kami"]))
+            .all()
+        )
+    finally:
+        session.close()
+
+    objects_by_kami: dict[str, list[Entity]] = {}
+    for entity, location in object_rows:
+        objects_by_kami.setdefault(location.kami_id, []).append(entity)
+
+    locations = []
+    for node in nodes:
+        node_id = node.get("id")
+        entity = entities.get(node_id)
+        archetype = dict(entity.archetype or {}) if entity else {}
+        objects = []
+        for obj in objects_by_kami.get(node_id, [])[:12]:
+            obj_arch = obj.archetype or {}
+            objects.append({
+                "name": obj.canonical_name,
+                "kind": obj.kind,
+                "description": obj_arch.get("description", ""),
+                "condition": obj_arch.get("condition", ""),
+            })
+        locations.append({
+            "id": node_id,
+            "name": (entity.canonical_name if entity else node.get("name")) or node_id,
+            "kind": archetype.get("kind") or archetype.get("kami_kind") or node.get("kind"),
+            "district": archetype.get("district", ""),
+            "description": archetype.get("description", ""),
+            "history": archetype.get("history", ""),
+            "current_situation": archetype.get("current_situation", ""),
+            "ambient_objects": archetype.get("ambient_objects", []),
+            "important_objects": objects,
+        })
+
+    node_name = {item["id"]: item["name"] for item in locations}
+    edge_lines = [
+        f"{node_name.get(edge.get('source'), edge.get('source'))} <-> "
+        f"{node_name.get(edge.get('target'), edge.get('target'))} "
+        f"({edge.get('edge_type', 'adjacent')})"
+        for edge in edges
+    ]
+    world_payload = {
+        "world_name": record.get("name") or "Kami world",
+        "world_prompt": record.get("prompt", ""),
+        "locations": locations,
+        "connections": edge_lines,
+    }
+    return world_payload
+
+
+def _build_world_map_prompt(style_id: str) -> str:
+    world_payload = _world_map_payload()
+    return f"""Create a SUPER-DETAILED illustrated world map from this simulation graph.
+
+Style: {WORLD_MAP_STYLES.get(style_id, WORLD_MAP_STYLES["realism"])}.
+
+Camera and composition:
+- Top-down or slightly angled top-view map, like a realistic cutaway site plan.
+- Show every listed location at once. No cropping. No hidden locations.
+- Show both exterior structure and interior contents: use cutaway roofs, open walls, transparent ceilings, or readable room interiors where needed.
+- Respect the graph connections: connected locations must be visibly adjacent or linked by corridors, doors, paths, hatches, trails, roads, tubes, or other plausible connectors.
+- Make the world spatially coherent and inspectable, not an abstract node graph.
+- The image must contain NO people, NO characters, NO astronauts, NO animals, NO portraits, NO silhouettes.
+- Do not draw numbered markers, map pins, colored circles, icons, UI overlays, legends, callouts, or readable labels.
+- Include only places, architecture, terrain, fixtures, furniture, equipment, objects, signs of use, lighting, surfaces, tools, storage, machines, paths, rooms, and environmental details.
+- Avoid readable text labels; use visual landmarks instead of words.
+- Keep the whole map legible at a glance but packed with micro-detail.
+
+World data:
+{json.dumps(world_payload, ensure_ascii=False, indent=2)[:22000]}
+"""
+
+
+def _png_dimensions(path: Path) -> tuple[int, int]:
+    with path.open("rb") as handle:
+        header = handle.read(24)
+    if header[:8] != b"\x89PNG\r\n\x1a\n":
+        return (1536, 1024)
+    return (int.from_bytes(header[16:20], "big"), int.from_bytes(header[20:24], "big"))
+
+
+def _metadata_path_for_image(path: Path) -> Path:
+    return path.with_suffix(".map.json")
+
+
+def _fallback_world_map_bboxes(locations: list[dict]) -> list[dict]:
+    count = max(len(locations), 1)
+    cols = max(2, math.ceil(math.sqrt(count)))
+    rows = max(1, math.ceil(count / cols))
+    bboxes = []
+    for idx, location in enumerate(locations):
+        col = idx % cols
+        row = idx // cols
+        cell_w = 0.84 / cols
+        cell_h = 0.76 / rows
+        x = 0.08 + col * cell_w + cell_w * 0.1
+        y = 0.12 + row * cell_h + cell_h * 0.1
+        bboxes.append({
+            "id": location["id"],
+            "bbox": {
+                "x": round(x, 4),
+                "y": round(y, 4),
+                "w": round(cell_w * 0.8, 4),
+                "h": round(cell_h * 0.8, 4),
+            },
+            "confidence": 0.2,
+            "source": "fallback_grid",
+        })
+    return bboxes
+
+
+def _coerce_world_map_bboxes(raw: Any, locations: list[dict]) -> list[dict]:
+    valid_ids = {location["id"] for location in locations}
+    items = raw.get("kami_bboxes") if isinstance(raw, dict) else raw
+    if not isinstance(items, list):
+        items = []
+
+    seen: set[str] = set()
+    result = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        kami_id = item.get("id") or item.get("kami_id")
+        bbox = item.get("bbox") or item
+        if kami_id not in valid_ids or not isinstance(bbox, dict):
+            continue
+        try:
+            x = float(bbox.get("x"))
+            y = float(bbox.get("y"))
+            w = float(bbox.get("w", bbox.get("width")))
+            h = float(bbox.get("h", bbox.get("height")))
+        except (TypeError, ValueError):
+            continue
+        if w <= 0 or h <= 0:
+            continue
+        x = max(0.0, min(1.0, x))
+        y = max(0.0, min(1.0, y))
+        w = max(0.01, min(1.0 - x, w))
+        h = max(0.01, min(1.0 - y, h))
+        result.append({
+            "id": kami_id,
+            "bbox": {
+                "x": round(x, 4),
+                "y": round(y, 4),
+                "w": round(w, 4),
+                "h": round(h, 4),
+            },
+            "confidence": float(item.get("confidence", 0.65) or 0.65),
+            "source": item.get("source", "vision"),
+        })
+        seen.add(kami_id)
+
+    for fallback in _fallback_world_map_bboxes([location for location in locations if location["id"] not in seen]):
+        result.append(fallback)
+    return result
+
+
+def _extract_json_object(text: str) -> dict:
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        if not match:
+            raise
+        return json.loads(match.group(0))
+
+
+async def _detect_world_map_bboxes(image_path: Path, locations: list[dict]) -> tuple[list[dict], str]:
+    if not config.openai_api_key:
+        return _fallback_world_map_bboxes(locations), "fallback_no_openai_key"
+
+    from openai import AsyncOpenAI
+
+    image_bytes = image_path.read_bytes()
+    image_data = base64.b64encode(image_bytes).decode("ascii")
+    model = config.strong_model_name
+    if ":" in model:
+        provider, model = model.split(":", 1)
+        if provider.strip().lower() != "openai":
+            model = "gpt-5.5"
+
+    payload = {
+        "locations": [
+            {
+                "id": location["id"],
+                "name": location["name"],
+                "kind": location.get("kind"),
+                "description": location.get("description", "")[:700],
+                "important_objects": location.get("important_objects", [])[:8],
+            }
+            for location in locations
+        ]
+    }
+    prompt = f"""Find the visual bounding box for every listed kami/location in this generated world-map image.
+
+Return ONLY JSON with this shape:
+{{
+  "kami_bboxes": [
+    {{"id": "location id", "bbox": {{"x": 0.0, "y": 0.0, "w": 0.1, "h": 0.1}}, "confidence": 0.0}}
+  ]
+}}
+
+Coordinates must be normalized against the full image: x/y are top-left, w/h are width/height, all in 0..1.
+Each bbox should contain the visible room/zone/area for that kami, not a label, marker, or decorative object.
+If a location is hard to identify, make the best spatial estimate from graph adjacency and visual landmarks.
+
+Locations:
+{json.dumps(payload, ensure_ascii=False, indent=2)[:16000]}
+"""
+    client = AsyncOpenAI(api_key=config.openai_api_key)
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "You are a precise visual map annotator. Return strict JSON only."},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_data}"}},
+                ],
+            },
+        ],
+        "max_completion_tokens": 3000,
+        "response_format": {"type": "json_object"},
+    }
+    try:
+        response = await client.chat.completions.create(**kwargs)
+    except Exception as exc:
+        logger.warning("World map bbox detection failed, using fallback grid: %s", exc)
+        return _fallback_world_map_bboxes(locations), "fallback_detection_error"
+
+    content = response.choices[0].message.content or "{}"
+    try:
+        parsed = _extract_json_object(content)
+        return _coerce_world_map_bboxes(parsed, locations), f"openai:{model}"
+    except Exception as exc:
+        logger.warning("World map bbox JSON parse failed, using fallback grid: %s", exc)
+        return _fallback_world_map_bboxes(locations), "fallback_parse_error"
+
+
+async def _build_world_map_metadata(
+    image_path: Path,
+    style_id: str | None,
+    provider: str | None,
+    model: str | None,
+    usage: dict | None = None,
+) -> dict:
+    width, height = _png_dimensions(image_path)
+    world_payload = _world_map_payload()
+    locations = world_payload.get("locations", [])
+    bboxes, bbox_source = await _detect_world_map_bboxes(image_path, locations)
+    metadata = {
+        "url": f"/generated/{image_path.name}",
+        "style": style_id,
+        "provider": provider,
+        "model": model,
+        "created_at": image_path.stat().st_mtime,
+        "image_width": width,
+        "image_height": height,
+        "bboxes": bboxes,
+        "bbox_source": bbox_source,
+        "usage": usage or {},
+    }
+    _metadata_path_for_image(image_path).write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return metadata
+
+
+async def _load_or_build_world_map_metadata(
+    image_path: Path,
+    style_id: str | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+) -> dict:
+    metadata_path = _metadata_path_for_image(image_path)
+    if metadata_path.exists():
+        try:
+            return json.loads(metadata_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            pass
+    return await _build_world_map_metadata(image_path, style_id, provider, model)
+
+
+async def _generate_openai_world_map(
+    prompt: str,
+    model: str,
+    size: str,
+    quality: str,
+    output_path: Path,
+) -> dict:
+    if not config.openai_api_key:
+        raise ValueError("OpenAI API key is not configured")
+    from openai import AsyncOpenAI
+
+    client = AsyncOpenAI(api_key=config.openai_api_key)
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "prompt": prompt,
+        "n": 1,
+        "size": size,
+        "quality": quality,
+    }
+    if model.startswith("gpt-image"):
+        kwargs["output_format"] = "png"
+    response = await client.images.generate(**kwargs)
+    item = response.data[0]
+    if getattr(item, "b64_json", None):
+        output_path.write_bytes(base64.b64decode(item.b64_json))
+    elif getattr(item, "url", None):
+        import urllib.request
+
+        output_path.write_bytes(
+            await asyncio.to_thread(lambda: urllib.request.urlopen(item.url, timeout=60).read())
+        )
+    else:
+        raise ValueError("OpenAI did not return image data")
+    usage = getattr(response, "usage", None)
+    return usage.model_dump() if hasattr(usage, "model_dump") else {}
+
+
+async def _generate_gemini_world_map(prompt: str, model: str, output_path: Path) -> dict:
+    if not config.gemini_api_key:
+        raise ValueError("Gemini API key is not configured")
+    from google import genai
+    from google.genai import types
+
+    client = genai.Client(api_key=config.gemini_api_key)
+
+    def _generate() -> bytes:
+        if model.startswith("imagen"):
+            response = client.models.generate_images(
+                model=model,
+                prompt=prompt,
+                config=types.GenerateImagesConfig(number_of_images=1),
+            )
+            if not response.generated_images:
+                raise ValueError("Gemini Imagen did not return image data")
+            return response.generated_images[0].image.image_bytes
+        response = client.models.generate_content(
+            model=model,
+            contents=[prompt],
+            config=types.GenerateContentConfig(response_modalities=["IMAGE"]),
+        )
+        parts = getattr(response, "parts", None) or response.candidates[0].content.parts
+        for part in parts:
+            inline = getattr(part, "inline_data", None)
+            if inline and getattr(inline, "data", None):
+                return inline.data
+        raise ValueError("Gemini did not return image data")
+
+    image_bytes = await asyncio.to_thread(_generate)
+    output_path.write_bytes(image_bytes)
+    return {}
 
 
 def _simulation_stats(record: dict) -> dict:
@@ -499,6 +894,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Kami Simulation", lifespan=lifespan)
+GENERATED_ASSETS_PATH.mkdir(exist_ok=True)
+app.mount("/generated", StaticFiles(directory=GENERATED_ASSETS_PATH), name="generated")
 
 app.add_middleware(
     CORSMiddleware,
@@ -518,6 +915,43 @@ async def get_status():
         "budget": budget.get_summary(),
         "active_simulation_id": sim_state.get("active_simulation_id"),
     }
+
+
+class LLMSettingsRequest(BaseModel):
+    provider: str | None = None
+    cheap_model: str | None = None
+    strong_model: str | None = None
+    anthropic_api_key: str | None = None
+    openai_api_key: str | None = None
+    gemini_api_key: str | None = None
+    image_provider: str | None = None
+    cheap_image_model: str | None = None
+    strong_image_model: str | None = None
+
+
+@app.get("/api/settings/llm")
+async def get_llm_settings():
+    return config.llm_settings()
+
+
+@app.put("/api/settings/llm")
+async def update_llm_settings(request: LLMSettingsRequest):
+    try:
+        settings = config.update_llm_settings(
+            provider=request.provider,
+            cheap_model=request.cheap_model,
+            strong_model=request.strong_model,
+            anthropic_api_key=request.anthropic_api_key,
+            openai_api_key=request.openai_api_key,
+            gemini_api_key=request.gemini_api_key,
+            image_provider=request.image_provider,
+            cheap_image_model=request.cheap_image_model,
+            strong_image_model=request.strong_image_model,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    llm_client.reset_clients()
+    return settings
 
 
 @app.get("/api/simulations")
@@ -588,6 +1022,133 @@ async def delete_simulation(simulation_id: str):
 async def get_graph():
     sg: SpatialGraph = sim_state["spatial_graph"]
     return sg.to_dict() if sg else {"nodes": [], "edges": []}
+
+
+class GenerateWorldMapRequest(BaseModel):
+    style: str = "realism"
+    tier: str = "strong"
+    provider: str | None = None
+    model: str | None = None
+    size: str = "1536x1024"
+    quality: str = "medium"
+
+
+@app.get("/api/world-map/styles")
+async def world_map_styles():
+    return {
+        "styles": [
+            {"id": style_id, "label": style_id.replace("_", " ").title(), "description": description}
+            for style_id, description in WORLD_MAP_STYLES.items()
+        ]
+    }
+
+
+@app.get("/api/world-map/latest")
+async def latest_world_map():
+    active_id = sim_state.get("active_simulation_id") or "world"
+    files = sorted(
+        GENERATED_ASSETS_PATH.glob(f"{active_id}_*.png"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    if not files:
+        return {"url": None}
+    latest = files[0]
+    style = next(
+        (style_id for style_id in WORLD_MAP_STYLES if latest.stem.endswith(f"_{style_id}")),
+        None,
+    )
+    return await _load_or_build_world_map_metadata(latest, style)
+
+
+@app.post("/api/world-map/generate")
+async def generate_world_map(request: GenerateWorldMapRequest):
+    style_id = request.style if request.style in WORLD_MAP_STYLES else "realism"
+    provider = (request.provider or config.image_provider or "openai").strip().lower()
+    if provider not in {"openai", "gemini"}:
+        raise HTTPException(status_code=422, detail=f"Unsupported image provider: {provider}")
+    model = request.model or (
+        config.cheap_image_model if request.tier == "cheap" else config.strong_image_model
+    )
+    prompt = _build_world_map_prompt(style_id)
+    filename = f"{sim_state.get('active_simulation_id') or 'world'}_{uuid.uuid4().hex[:8]}_{style_id}.png"
+    output_path = GENERATED_ASSETS_PATH / filename
+    try:
+        if provider == "openai":
+            usage = await _generate_openai_world_map(prompt, model, request.size, request.quality, output_path)
+        else:
+            usage = await _generate_gemini_world_map(prompt, model, output_path)
+    except Exception as exc:
+        logger.error("World map generation failed", exc_info=True)
+        raise HTTPException(status_code=422, detail=f"World map generation failed: {exc}") from exc
+    metadata = await _build_world_map_metadata(output_path, style_id, provider, model, usage)
+    return {**metadata, "prompt": prompt}
+
+
+@app.get("/api/entity/{entity_id:path}")
+async def get_entity(entity_id: str):
+    session = sim_state["session_factory"]()
+    try:
+        entity = session.get(Entity, entity_id)
+        if not entity:
+            raise HTTPException(status_code=404, detail="Entity not found")
+
+        location = fs.get_current_location(session, entity_id)
+        kami_entity = session.get(Entity, location.kami_id) if location and location.kami_id else None
+        container_entity = session.get(Entity, location.container_id) if location and location.container_id else None
+        states = fs.get_state(session, entity_id)
+        relations = fs.get_relations(session, entity_id, direction="both")
+        recent_events = (
+            session.query(Event)
+            .order_by(Event.tick.desc())
+            .limit(300)
+            .all()
+        )
+        relevant_events = [
+            event for event in recent_events
+            if entity_id in (event.participants or [])
+            or (event.kami_id == entity_id)
+            or (isinstance(event.payload, dict) and entity_id in json.dumps(event.payload, ensure_ascii=False))
+        ][:12]
+
+        return {
+            "entity_id": entity.entity_id,
+            "name": entity.canonical_name,
+            "kind": entity.kind,
+            "archetype": entity.archetype or {},
+            "created_at_tick": entity.created_at_tick,
+            "created_by_event": entity.created_by_event,
+            "location": {
+                "kami_id": location.kami_id if location else None,
+                "kami_name": kami_entity.canonical_name if kami_entity else None,
+                "container_id": location.container_id if location else None,
+                "container_name": container_entity.canonical_name if container_entity else None,
+                "since_tick": location.since_tick if location else None,
+            },
+            "states": {state.attribute: state.value for state in states},
+            "relations": [
+                {
+                    "from": relation.from_entity,
+                    "to": relation.to_entity,
+                    "type": relation.rel_type,
+                    "weight": relation.weight,
+                }
+                for relation in relations[:20]
+            ],
+            "recent_events": [
+                {
+                    "event_id": event.event_id,
+                    "tick": event.tick,
+                    "event_type": event.event_type,
+                    "kami_id": event.kami_id,
+                    "narrative": event.narrative,
+                    "participants": event.participants,
+                }
+                for event in relevant_events
+            ],
+        }
+    finally:
+        session.close()
 
 
 @app.get("/api/kami/{kami_id}")

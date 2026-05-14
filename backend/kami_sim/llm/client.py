@@ -26,6 +26,11 @@ class LLMClient:
         self._openai_client = None
         self._gemini_client = None
 
+    def reset_clients(self) -> None:
+        self._anthropic_client = None
+        self._openai_client = None
+        self._gemini_client = None
+
     def _get_model(self, tier: str) -> tuple[str, str]:
         if tier == "cheap":
             model = config.cheap_model_name

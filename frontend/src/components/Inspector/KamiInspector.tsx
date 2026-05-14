@@ -1,6 +1,7 @@
 import { Box, Map, Radio, Users } from 'lucide-react'
 import { useSimStore } from '../../stores/simStore'
 import { kindLabel } from '../../utils/simView'
+import EntityReferenceText from './EntityReferenceText'
 
 export default function KamiInspector() {
   const { kamiDetail, selectAgent, selectionLoading, selectionError } = useSimStore()
@@ -121,7 +122,7 @@ export default function KamiInspector() {
                     <span className="text-slate-500">{event.event_type}</span>
                     <span className="text-slate-600">s={event.salience?.toFixed(2)}</span>
                   </div>
-                  <p className="text-slate-300 leading-relaxed">{event.narrative}</p>
+                  <p className="text-slate-300 leading-relaxed"><EntityReferenceText text={event.narrative} /></p>
                 </div>
               ))}
             </div>

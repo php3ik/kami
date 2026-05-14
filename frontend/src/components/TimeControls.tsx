@@ -1,7 +1,11 @@
 import { useSimStore } from '../stores/simStore'
-import { FastForward, Pause, Play, StepForward } from 'lucide-react'
+import { FastForward, Pause, Play, Settings2, StepForward } from 'lucide-react'
 
-export default function TimeControls() {
+interface Props {
+  onOpenSettings?: () => void
+}
+
+export default function TimeControls({ onOpenSettings }: Props) {
   const { step, startRun, pause, running, paused } = useSimStore()
 
   return (
@@ -50,6 +54,13 @@ export default function TimeControls() {
       <div className="ml-auto text-xs text-slate-500 min-w-[120px] text-right">
         {paused ? 'Ready for the next tick' : running ? 'Streaming sub-tick activity' : 'Simulation idle'}
       </div>
+      <button
+        onClick={onOpenSettings}
+        className="inline-flex h-8 w-8 items-center justify-center border border-slate-800 bg-slate-950 text-slate-400 transition-colors hover:border-purple-500 hover:text-slate-100"
+        title="LLM settings"
+      >
+        <Settings2 size={15} />
+      </button>
     </div>
   )
 }
