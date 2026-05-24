@@ -7,6 +7,7 @@ name = "kami-sim"
 version = "0.1.0"
 description = "LLM-driven multi-agent town simulation"
 requires-python = ">=3.11"
+license = "Apache-2.0"
 
 [tool.hatch.build.targets.wheel]
 packages = ["backend/kami_sim"]
