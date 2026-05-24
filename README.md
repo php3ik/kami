@@ -1,42 +1,91 @@
 # Kami Simulation
 
-Kami Simulation is an advanced, LLM-powered multi-agent social simulation environment. It models autonomous agents interacting within a spatial graph of distinct locations called Kamis.
+Kami Simulation is an LLM-powered multi-agent world simulation environment. It models autonomous characters moving through a graph of spatial locations called **Kamis**, where each Kami acts as a local game master for its scene.
 
-The core philosophy of this project is to separate subjective cognition from objective reality. Agents hold beliefs and formulate intents, but they cannot directly modify the world. Instead, the Kami for a location acts as a local game master, resolves conflicting intents, and commits the objective outcome of each simulation tick.
+The core idea is to separate subjective cognition from objective reality. Agents can observe, think, form beliefs, and declare intentions, but they do not directly mutate the world. Kamis resolve the local scene, apply physical constraints, commit world-state changes, and emit narrative events.
 
----
+## Current Capabilities
 
-## Core Concepts
+- Dynamic world creation from a natural-language prompt, including characters, Kamis, objects, relationships, biographies, and local history.
+- Multiple saved simulation worlds with switching, deletion, population/count/cost summaries, and isolated world data inside the shared database.
+- Multi-provider LLM routing for Anthropic, OpenAI, and Gemini, with cheap/strong model tiers.
+- In-app settings panel for LLM provider, model names, API tokens, and image-generation model settings.
+- Tick-based simulation with agent cognition, Kami scene resolution, state mutation, event logging, and WebSocket updates.
+- Graph view showing spatial Kamis, live agent positions, activity density, selected entities, and optional edge visibility.
+- Timeline preview for agents or Kamis, with per-tick inspection.
+- Generated world-map view: create a detailed top-view/cutaway map from the Kami graph, detect Kami bounding boxes, and anchor graph nodes to the generated image during pan/zoom.
+- Entity reference inspection: object/entity ids in logs become hover/clickable references with details, location, state, and recent events.
+- Agent and Kami inspectors with current state, recent thoughts/events, biographies, goals, relations, objects, and scene context.
 
-### 1. Agents: Subjective Cognition
+## Architecture
 
-Agents are autonomous entities powered by Large Language Models through the Anthropic API. They maintain internal states, social relationships, and subjective beliefs about the world. During their turn, agents observe their surroundings, generate an inner monologue, update beliefs, and declare intents such as "talk to Oksana" or "walk to the Laboratory".
+### Agents
 
-### 2. Kamis: Objective Reality and Game Masters
+Agents are subjective actors. They maintain internal state, relationships, beliefs, goals, and personality context. During a tick they observe their current Kami, generate an inner signal, and declare an intent such as speaking, moving, inspecting an object, waiting, or performing work.
 
-A Kami represents a distinct spatial location, such as a room, forest clearing, or space station module. Kamis act as localized game masters. After all agents in a Kami declare intents, the Kami receives the scene context, evaluates those intents, resolves conflicts, enforces physical rules, mutates world state, and emits a narrative event describing what actually happened.
+### Kamis
 
-### 3. Bulk Synchronous Parallel Tick Architecture
+A Kami is an objective spatial scene: a room, station module, clearing, village square, corridor, tent, or any other world location. Kamis receive the intents of agents currently inside them, resolve conflicts, enforce local physics and constraints, update objects/entities, and produce the event that becomes reality.
 
-The simulation progresses in discrete ticks orchestrated by the `TickScheduler`.
+### FactStore
 
-1. Agent cognition: active agents process observations and declare intents.
-2. Kami resolution: active Kamis process intents in their locations and propose state mutations.
-3. Commit phase: proposed moves, state changes, and events are committed to the central database.
-4. Propagation phase: events are broadcast to the frontend UI and agent memory systems.
+The ground truth is stored in SQLite through SQLAlchemy as an entity-component timeline:
 
-### 4. FactStore Database
+- `Entity`: agents, Kamis, objects, animals, vehicles, documents, channels.
+- `Location`: current and historical placement of entities inside Kamis or containers.
+- `PhysicalState`: key-value state over time.
+- `Relation`: social, spatial, ownership, and semantic relationships.
+- `AgentBelief`: subjective facts that may differ from reality.
+- `AgentIntentRecord`: proposed actions and their resolution state.
+- `ConversationThread`: ongoing local conversations.
+- `Event`: committed narrative history.
 
-The ground truth of the simulation is stored in SQLite through SQLAlchemy. It acts as an entity-component system storing:
+### Tick Flow
 
-- Entities: agents, objects, and Kamis.
-- Locations: current and historical entity placement.
-- States and properties: key-value attributes of entities.
-- Relations: social graphs and opinions between agents.
-- Beliefs: subjective, potentially false facts held by agents.
-- Events: the historical narrative log of the simulation.
+When the UI steps the simulation:
 
----
+1. The frontend calls `/api/sim/step`.
+2. `TickScheduler` opens the next tick.
+3. Agent workers observe current state and produce thoughts/intents through the configured LLM provider.
+4. The scheduler groups intents by Kami.
+5. Kami workers resolve each active scene and produce structured mutations.
+6. FactStore validates and commits accepted mutations.
+7. Events, thoughts, costs, and activity updates stream to the UI.
+
+## LLM Providers
+
+The backend supports:
+
+- Anthropic
+- OpenAI
+- Gemini
+
+The provider can be configured globally with `LLM_PROVIDER`, or per model tier by prefixing a model with `provider:model-name`.
+
+Example:
+
+```env
+LLM_PROVIDER=openai
+CHEAP_MODEL=gpt-5.4-mini
+STRONG_MODEL=gpt-5.5
+```
+
+Per-tier override:
+
+```env
+CHEAP_MODEL=openai:gpt-5.4-mini
+STRONG_MODEL=gemini:gemini-2.5-pro
+```
+
+Image generation settings are also configurable for generated world maps:
+
+```env
+IMAGE_PROVIDER=openai
+CHEAP_IMAGE_MODEL=gpt-image-1-mini
+STRONG_IMAGE_MODEL=gpt-image-2
+```
+
+These settings can also be updated from the UI settings panel.
 
 ## Getting Started
 
@@ -44,85 +93,89 @@ The ground truth of the simulation is stored in SQLite through SQLAlchemy. It ac
 
 - Python 3.11+
 - Node.js and npm
-- An Anthropic API key
+- At least one API key for Anthropic, OpenAI, or Gemini
 
-### Backend Setup
+### Environment
 
-Navigate to the backend directory and install the Python dependencies:
+Create `.env` from `.env.example` and fill in the providers you plan to use:
+
+```env
+ANTHROPIC_API_KEY=sk-ant-...
+OPENAI_API_KEY=sk-...
+GEMINI_API_KEY=...
+DATABASE_URL=sqlite:///./kami_sim.db
+
+LLM_PROVIDER=openai
+CHEAP_MODEL=gpt-5.4-mini
+STRONG_MODEL=gpt-5.5
+```
+
+### Backend
 
 ```bash
 cd backend
 pip install -e ".[dev]"
-```
-
-Create an `.env` file in the root of the `backend` directory and add your Anthropic API key:
-
-```env
-ANTHROPIC_API_KEY=your_api_key_here
-OPENAI_API_KEY=your_api_key_here
-GEMINI_API_KEY=your_api_key_here
-DATABASE_URL=sqlite:///./kami_sim.db
-```
-
-Select the LLM provider globally with `LLM_PROVIDER`:
-
-```env
-LLM_PROVIDER=anthropic
-CHEAP_MODEL=claude-haiku-4-5-20251001
-STRONG_MODEL=claude-sonnet-4-6
-```
-
-You can also override the provider per model tier by prefixing the model name:
-
-```env
-CHEAP_MODEL=openai:gpt-4.1-mini
-STRONG_MODEL=gemini:gemini-2.5-pro
-```
-
-Start the FastAPI server:
-
-```bash
 python -m uvicorn kami_sim.api.server:app --host 0.0.0.0 --port 8000
 ```
 
-### Frontend Setup
+Backend API:
 
-Navigate to the frontend directory and install the Node dependencies:
+```text
+http://127.0.0.1:8000
+```
+
+Useful endpoints:
+
+- `GET /api/status`
+- `GET /api/simulations`
+- `POST /api/sim/create`
+- `POST /api/sim/step`
+- `GET /api/graph`
+- `GET /api/settings/llm`
+- `PUT /api/settings/llm`
+- `POST /api/world-map/generate`
+- `GET /api/entity/{entity_id}`
+
+### Frontend
 
 ```bash
 cd frontend
 npm install
+npm run dev -- --host 0.0.0.0
 ```
 
-Start the Vite development server:
+Open:
 
-```bash
-npm run dev
+```text
+http://localhost:5173
 ```
-
-Open `http://localhost:5173`.
-
----
 
 ## Using the UI
 
-The frontend provides a real-time "God-mode" view into the simulation:
+- Use **Create Simulation** to build a new world from a text prompt and population count.
+- Use the world switcher to select, inspect, or delete saved worlds.
+- Use **Step 1**, **Step 10**, **Step 100**, or **Run 100** to advance the simulation.
+- Use **Graph** mode for spatial understanding of Kamis and live agent positions.
+- Use **Timeline** mode to inspect agents or Kamis across ticks.
+- Generate a detailed world map from Graph mode, then pan/zoom with graph nodes anchored to detected Kami regions.
+- Toggle graph links when the generated map is easier to read without edges.
+- Click agents, Kamis, or entity references inside logs to inspect details.
+- Open the LLM settings panel from the top controls to change providers, model tiers, image models, and API tokens.
 
-- Top bar: current tick, simulation status, LLM call count, and API cost tracker.
-- Time controls: step the simulation forward or run continuously.
-- Kami graph: a force-directed graph of Kamis and the agents currently inside them.
-- Agent activity board: live agent monologues and current locations.
-- Inspectors: detailed Kami and agent database records, relationships, beliefs, and recent events.
+## Generated World Maps
 
-## How the Logic Flows
+The world-map generator builds a detailed prompt from the current simulation graph, Kami descriptions, objects, connections, and setting. The generated image is saved under backend-generated assets and served from `/generated/...`.
 
-When you click "Step 1" in the UI:
+After generation, the backend performs a vision pass to detect normalized bounding boxes for each Kami. The frontend uses those boxes to position graph nodes inside the corresponding area of the image. The map image and graph overlay share the same pan/zoom transform, so node positions stay stable while navigating.
 
-1. The frontend calls `/api/sim/step`.
-2. `TickScheduler` initializes the next tick.
-3. WebSockets stream progress events to the frontend.
-4. Agent workers call the Anthropic API concurrently and return intents plus inner monologues.
-5. The scheduler groups intents by Kami location.
-6. Kami workers call the Anthropic API concurrently and produce structured tool calls.
-7. The backend commits valid mutations to SQLite through the FactStore tool layer.
-8. The backend broadcasts the final tick summary through WebSockets.
+## Development Notes
+
+- Runtime-generated maps and presentation audit outputs are ignored by Git.
+- The SQLite database is used as local simulation state.
+- Avoid committing API keys or local `.env` files.
+- Run `npm run build` in `frontend` to validate TypeScript and production build.
+- Run `python -m compileall backend/kami_sim` for a quick backend syntax check.
+
+## License
+
+This project is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for details.
