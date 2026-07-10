@@ -286,3 +286,30 @@ async def test_deterministic_mode_forces_temperature_and_provider_seed(monkeypat
 
     assert captured["temperature"] == 0
     assert isinstance(captured["seed"], int)
+
+
+@pytest.mark.asyncio
+async def test_call_can_override_default_timeout_for_long_world_build(monkeypatch):
+    tracker = BudgetTracker()
+    monkeypatch.setattr(client_module, "budget", tracker)
+    monkeypatch.setattr(config, "llm_provider", "openai")
+    monkeypatch.setattr(config, "cheap_model_name", "gpt-test")
+    monkeypatch.setattr(config, "llm_soft_timeout_seconds", 0.001)
+    client = LLMClient()
+
+    async def moderately_slow_call(*args, **kwargs):
+        await asyncio.sleep(0.01)
+        return {
+            "content": "ok",
+            "tool_calls": [],
+            "usage": {"input_tokens": 2, "output_tokens": 1},
+        }
+
+    monkeypatch.setattr(client, "_call_openai", moderately_slow_call)
+    result = await client.call(
+        [{"role": "user", "content": "build"}],
+        component="WorldBuilder",
+        timeout_seconds=0.1,
+    )
+
+    assert result["content"] == "ok"

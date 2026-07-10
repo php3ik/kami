@@ -128,28 +128,10 @@ WORLD_TOOLS = [{
 
 
 async def build_dynamic_world(prompt: str, agent_count: int, name: str | None = None) -> dict:
-    target_kami_count = max(8, min(28, agent_count * 2))
-    world = await _generate_world(prompt, agent_count, target_kami_count, name)
-    world = _normalize_world(world, prompt, agent_count, name)
-    errors = _validate_world(world, agent_count)
-    if errors:
-        critical_errors, quality_warnings = _split_validation_errors(errors)
-        if critical_errors:
-            logger.warning("World contract failed critical validation, asking LLM repair: %s", critical_errors)
-            world = await _repair_world(prompt, agent_count, target_kami_count, name, world, critical_errors)
-            world = _normalize_world(world, prompt, agent_count, name)
-            errors = _validate_world(world, agent_count)
-        else:
-            logger.warning("World accepted with quality warnings before expensive repair: %s", quality_warnings)
-            world["quality_warnings"] = quality_warnings
-            return world
-    if errors:
-        critical_errors, quality_warnings = _split_validation_errors(errors)
-        if critical_errors:
-            raise ValueError("WorldBuilder produced invalid world: " + "; ".join(critical_errors))
-        logger.warning("World accepted with quality warnings after repair: %s", quality_warnings)
-        world["quality_warnings"] = quality_warnings
-    return world
+    """Backward-compatible entry point for the canonical staged pipeline."""
+    from .staged import build_staged_world
+
+    return await build_staged_world(prompt, agent_count, name)
 
 
 async def _generate_world(
@@ -603,7 +585,7 @@ def _normalize_world(
     world["objects"] = _normalize_objects(world.get("objects") or [], kami_ids)
     world["backstories"] = {
         agent["name"]: {
-            "life_narrative": agent.get("background", ""),
+            "life_narrative": agent.get("life_narrative") or agent.get("background", ""),
             "memories": agent.get("memories", []),
             "private_history": agent.get("private_history", []),
             "secrets": agent.get("secrets", []),
@@ -728,6 +710,7 @@ def _normalize_agents(raw_agents: list[dict], kami_specs: list[dict], agent_coun
             "work": work,
             "appearance": str(raw.get("appearance") or "Grounded, specific appearance tied to this world.").strip(),
             "background": str(raw.get("background") or "").strip(),
+            "life_narrative": str(raw.get("life_narrative") or "").strip(),
             "private_history": _string_list(raw.get("private_history"), min_items=0),
             "memories": _normalize_memories(memories),
             "secrets": _string_list(raw.get("secrets"), min_items=0),
@@ -934,8 +917,6 @@ def _string_list(value: Any, min_items: int) -> list[str]:
         items = [str(item).strip() for item in value if str(item).strip()]
     else:
         items = []
-    while len(items) < min_items:
-        items.append("context-shaped")
     return items
 
 

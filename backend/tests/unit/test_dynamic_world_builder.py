@@ -1,7 +1,7 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from kami_sim.factstore.models import Base
+from kami_sim.factstore.models import Base, EpisodicMemoryRecord, Relation, Schedule
 from kami_sim.factstore import tools as fs
 from kami_sim.world_builder.build_world import load_world_into_db
 from kami_sim.world_builder.dynamic_world import _normalize_world, _validate_world
@@ -134,5 +134,13 @@ def test_dynamic_world_normalizes_and_loads_objects():
         obj = session.query(fs.Entity).filter(fs.Entity.kind == "document").one()
         assert obj.canonical_name == "Logbook"
         assert fs.get_current_location(session, obj.entity_id).kami_id == "sim_test__kami_gate"
+        assert session.query(Schedule).count() == 56
+        assert session.query(Relation).filter(Relation.rel_type == "lives_in").count() == 2
+        memory = session.query(EpisodicMemoryRecord).filter(
+            EpisodicMemoryRecord.agent_id == "sim_test__agent_one"
+        ).first()
+        assert memory is not None
+        assert memory.participants == ["sim_test__agent_one"]
+        assert {edge["edge_type"] for edge in graph.to_dict()["edges"]} == {"adjacent"}
     finally:
         session.close()

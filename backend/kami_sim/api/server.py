@@ -62,9 +62,10 @@ from ..factstore.models import (
     SemanticInsight,
     SimulationTick,
     TransitJourney,
+    WorldBuildJob,
     init_db,
 )
-from ..llm.budget import BudgetExceededError, budget
+from ..llm.budget import budget
 from ..llm.client import llm_client
 from ..memory import memory_runtime
 from ..scheduler.tick_scheduler import TickScheduler
@@ -77,6 +78,8 @@ from ..oriv_world import build_oriv_world
 from ..spatial.graph import SpatialGraph
 from ..spatial.transit import get_agent_transit
 from ..world_builder.build_world import build_world, load_world_into_db
+from ..world_builder.jobs import WorldBuildJobRepository
+from ..world_builder.staged import WorldBuildCancelled
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +90,7 @@ sim_state: dict[str, Any] = {
     "spatial_graph": None,
     "active_simulation_id": None,
     "simulation_repository": None,
+    "world_build_job_repository": None,
 }
 run_manager = SimulationRunManager()
 
@@ -1369,6 +1373,22 @@ async def lifespan(app: FastAPI):
     )
     repository = SimulationRepository(session_factory)
     sim_state["simulation_repository"] = repository
+    job_repository = WorldBuildJobRepository(session_factory)
+    sim_state["world_build_job_repository"] = job_repository
+    interrupted_jobs = job_repository.list(statuses={"queued", "running"}, limit=100)
+    interrupted = job_repository.mark_interrupted()
+    if interrupted:
+        logger.warning("Marked %s interrupted world builds as resumable", interrupted)
+        for interrupted_job in interrupted_jobs:
+            try:
+                repository.update_runtime(
+                    interrupted_job["simulation_id"], status="failed"
+                )
+            except KeyError:
+                logger.warning(
+                    "Interrupted build %s has no simulation record",
+                    interrupted_job["job_id"],
+                )
     imported = repository.import_legacy_registry(legacy_registry)
     if imported:
         logger.info("Imported %s simulations from legacy registry", imported)
@@ -1647,6 +1667,7 @@ async def delete_simulation(simulation_id: str):
     session = sim_state["session_factory"]()
     try:
         scoped_models = (
+            WorldBuildJob,
             SimulationTick,
             LLMCall,
             KamiMemoryProfile,
@@ -2561,67 +2582,223 @@ class CreateSimRequest(BaseModel):
     agent_count: int = Field(default=10, ge=1, le=100)
     name: str | None = Field(default=None, max_length=120)
 
-@app.post("/api/sim/create")
-async def create_sim(request: CreateSimRequest):
-    _ensure_runtime_idle("create a simulation")
-    sim_id = uuid.uuid4().hex[:10]
-    async with run_manager.command("create simulation", sim_id, running=False):
-        db_url = config.database_url
-        created_at = _now_iso()
-        record = {
-            "id": sim_id,
-            "name": request.name
-            or (request.prompt[:48] + ("..." if len(request.prompt) > 48 else "")),
-            "prompt": request.prompt,
-            "status": "building",
-            "db_url": db_url,
-            "db_path": str(_sqlite_path_from_url(db_url)),
-            "graph_path": None,
-            "graph_data": {},
-            "created_at": created_at,
-            "updated_at": created_at,
-            "total_cost_usd": 0.0,
-        }
-        _register_or_update(record, active=False)
-        logger.info("Generating world %s with %s agents", sim_id, request.agent_count)
-        try:
-            with budget.scope(sim_id):
-                world_output = await build_world(
-                    request.prompt,
-                    agent_count=request.agent_count,
-                    name=request.name,
-                )
-            session_factory = sim_state["session_factory"]
-            session = session_factory()
-            try:
-                spatial_graph = load_world_into_db(
-                    session, world_output, simulation_id=sim_id
-                )
-            finally:
-                session.close()
-        except BudgetExceededError as exc:
-            sim_state["simulation_repository"].update_runtime(sim_id, status="failed")
-            raise HTTPException(status_code=402, detail=str(exc)) from exc
-        except Exception as exc:
-            sim_state["simulation_repository"].update_runtime(sim_id, status="failed")
-            logger.error("World generation failed", exc_info=True)
-            raise HTTPException(
-                status_code=422,
-                detail=f"World generation failed: {exc}",
-            ) from exc
 
-        graph_data = spatial_graph.to_dict()
+async def _execute_world_build(job_id: str) -> None:
+    jobs: WorldBuildJobRepository = sim_state["world_build_job_repository"]
+    job = jobs.get(job_id, include_checkpoint=True)
+    if job is None:
+        return
+    request = job["request"]
+    sim_id = job["simulation_id"]
+    repository: SimulationRepository = sim_state["simulation_repository"]
+    jobs.update(
+        job_id,
+        status="running",
+        stage=job.get("stage") or "seed",
+        message="World build started",
+        cancel_requested=False,
+    )
+
+    async def report_progress(progress: dict) -> None:
+        jobs.update(
+            job_id,
+            status="running",
+            stage=progress["stage"],
+            completed_units=progress["completed_units"],
+            total_units=progress["total_units"],
+            message=progress["message"],
+        )
+        await _broadcast({
+            "type": "world_build_progress",
+            "data": {"job_id": job_id, "simulation_id": sim_id, **progress},
+        })
+
+    async def save_checkpoint(checkpoint: dict) -> None:
+        jobs.update(job_id, checkpoint=checkpoint)
+
+    def cancelled() -> bool:
+        current = jobs.get(job_id)
+        return bool(current and current["cancel_requested"])
+
+    async def mark_cancelled() -> None:
+        repository.update_runtime(sim_id, status="cancelled")
+        jobs.update(
+            job_id,
+            status="cancelled",
+            message="World build cancelled; resume is available",
+            error="World build cancelled",
+        )
+        await _broadcast({
+            "type": "world_build_cancelled",
+            "data": {"job_id": job_id, "simulation_id": sim_id},
+        })
+
+    try:
+        with budget.scope(sim_id):
+            world_output = await build_world(
+                request["prompt"],
+                agent_count=int(request["agent_count"]),
+                name=request.get("name"),
+                checkpoint=job.get("checkpoint") or {},
+                progress_callback=report_progress,
+                checkpoint_callback=save_checkpoint,
+                cancel_check=cancelled,
+            )
+        session_factory = sim_state["session_factory"]
+        session = session_factory()
+        try:
+            spatial_graph = load_world_into_db(
+                session,
+                world_output,
+                simulation_id=sim_id,
+                commit=False,
+            )
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+        record = repository.get(sim_id)
+        if record is None:
+            raise RuntimeError(f"Simulation record disappeared during build: {sim_id}")
         record.update(
             status="paused",
-            graph_data=graph_data,
+            graph_data=spatial_graph.to_dict(),
             updated_at=_now_iso(),
             total_cost_usd=budget.get_summary(sim_id)["total_cost_usd"],
         )
         _register_or_update(record, active=True)
         _set_active_simulation(record)
+        jobs.update(
+            job_id,
+            status="completed",
+            stage="completed",
+            completed_units=5,
+            total_units=5,
+            message="World build complete",
+        )
         await _broadcast({"type": "simulation_switched", "data": {"id": sim_id}})
+        await _broadcast({
+            "type": "world_build_completed",
+            "data": {"job_id": job_id, "simulation_id": sim_id},
+        })
+    except WorldBuildCancelled:
+        await mark_cancelled()
+    except asyncio.CancelledError:
+        await mark_cancelled()
+        raise
+    except Exception as exc:
+        repository.update_runtime(sim_id, status="failed")
+        jobs.update(
+            job_id,
+            status="failed",
+            message="World build failed; resume is available",
+            error=str(exc),
+        )
+        logger.error(
+            "World generation failed for %s: %s",
+            sim_id,
+            exc,
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
+        await _broadcast({
+            "type": "world_build_failed",
+            "data": {"job_id": job_id, "simulation_id": sim_id, "error": str(exc)},
+        })
 
-        return {"status": "success", "simulation": _enrich_simulation_record(record)}
+
+def _start_world_build(job_id: str, simulation_id: str) -> None:
+    run_manager.start_operation(
+        "build world",
+        simulation_id,
+        lambda: _execute_world_build(job_id),
+    )
+
+
+@app.post("/api/sim/create")
+async def create_sim(request: CreateSimRequest):
+    _ensure_runtime_idle("create a simulation")
+    sim_id = uuid.uuid4().hex[:10]
+    db_url = config.database_url
+    created_at = _now_iso()
+    record = {
+        "id": sim_id,
+        "name": request.name
+        or (request.prompt[:48] + ("..." if len(request.prompt) > 48 else "")),
+        "prompt": request.prompt,
+        "status": "building",
+        "db_url": db_url,
+        "db_path": str(_sqlite_path_from_url(db_url)),
+        "graph_path": None,
+        "graph_data": {},
+        "created_at": created_at,
+        "updated_at": created_at,
+        "total_cost_usd": 0.0,
+    }
+    _register_or_update(record, active=False)
+    jobs: WorldBuildJobRepository = sim_state["world_build_job_repository"]
+    job_id = f"build_{sim_id}"
+    job = jobs.create(job_id, sim_id, request.model_dump())
+    _start_world_build(job_id, sim_id)
+    return JSONResponse(
+        status_code=202,
+        content={"status": "building", "job": job, "simulation_id": sim_id},
+    )
+
+
+@app.get("/api/world-builds/{job_id}")
+async def get_world_build(job_id: str):
+    jobs: WorldBuildJobRepository = sim_state["world_build_job_repository"]
+    job = jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="World build job not found")
+    return {"job": job}
+
+
+@app.get("/api/world-builds")
+async def list_world_builds(
+    simulation_id: str | None = None,
+    limit: int = Query(20, ge=1, le=100),
+):
+    jobs: WorldBuildJobRepository = sim_state["world_build_job_repository"]
+    return {"jobs": jobs.list(simulation_id=simulation_id, limit=limit)}
+
+
+@app.post("/api/world-builds/{job_id}/cancel")
+async def cancel_world_build(job_id: str):
+    jobs: WorldBuildJobRepository = sim_state["world_build_job_repository"]
+    job = jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="World build job not found")
+    if job["status"] not in {"queued", "running"}:
+        raise HTTPException(status_code=409, detail="World build is not running")
+    jobs.request_cancel(job_id)
+    await run_manager.cancel_operation(job["simulation_id"])
+    return {"job": jobs.get(job_id)}
+
+
+@app.post("/api/world-builds/{job_id}/resume")
+async def resume_world_build(job_id: str):
+    _ensure_runtime_idle("resume a world build")
+    jobs: WorldBuildJobRepository = sim_state["world_build_job_repository"]
+    job = jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="World build job not found")
+    if job["status"] not in {"failed", "cancelled"}:
+        raise HTTPException(status_code=409, detail="World build is not resumable")
+    sim_state["simulation_repository"].update_runtime(
+        job["simulation_id"], status="building"
+    )
+    jobs.update(
+        job_id,
+        status="queued",
+        message="World build queued for resume",
+        cancel_requested=False,
+    )
+    _start_world_build(job_id, job["simulation_id"])
+    return JSONResponse(status_code=202, content={"job": jobs.get(job_id)})
 
 
 @app.post("/api/sim/run")

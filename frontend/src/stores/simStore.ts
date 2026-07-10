@@ -30,6 +30,7 @@ interface SimState {
   selectionError: string | null
   
   isCreateModalOpen: boolean
+  worldBuildJob: any | null
 
   // Events
   recentEvents: any[]
@@ -61,6 +62,8 @@ interface SimState {
   selectTimelineCell: (kind: 'agent' | 'kami', id: string, tick: number) => Promise<void>
   openCreateModal: (open: boolean) => void
   createSim: (prompt: string, count: number, name?: string) => Promise<void>
+  cancelWorldBuild: () => Promise<void>
+  resumeWorldBuild: () => Promise<void>
 }
 
 export const useSimStore = create<SimState>((set, get) => ({
@@ -85,6 +88,7 @@ export const useSimStore = create<SimState>((set, get) => ({
   selectionLoading: false,
   selectionError: null,
   isCreateModalOpen: false,
+  worldBuildJob: null,
   recentEvents: [],
   tickLog: [],
   liveActivity: [],
@@ -111,10 +115,17 @@ export const useSimStore = create<SimState>((set, get) => ({
   },
 
   loadSimulations: async () => {
-    const data = await api.fetchSimulations()
+    const [data, builds] = await Promise.all([
+      api.fetchSimulations(),
+      api.fetchWorldBuilds(),
+    ])
+    const recoverableJob = (builds.jobs || []).find((job: any) =>
+      ['queued', 'running', 'failed', 'cancelled'].includes(job.status)
+    )
     set({
       simulations: data.simulations || [],
       activeSimulationId: data.active_id || null,
+      worldBuildJob: get().worldBuildJob || recoverableJob || null,
     })
   },
 
@@ -342,7 +353,9 @@ export const useSimStore = create<SimState>((set, get) => ({
   openCreateModal: (open) => set({ isCreateModalOpen: open }),
 
   createSim: async (prompt, count, name) => {
-    await api.createSim(prompt, count, name)
+    const started = await api.createSim(prompt, count, name)
+    set({ worldBuildJob: started.job })
+    await waitForWorldBuild(started.job.job_id, set)
     set({
       tickLog: [],
       recentEvents: [],
@@ -361,8 +374,42 @@ export const useSimStore = create<SimState>((set, get) => ({
     await get().refreshStatus()
     await get().loadSimulations()
     if (get().viewMode === 'timeline') await get().loadTimeline()
+    set({ worldBuildJob: null })
+  },
+
+  cancelWorldBuild: async () => {
+    const job = get().worldBuildJob
+    if (!job?.job_id) return
+    const result = await api.cancelWorldBuild(job.job_id)
+    set({ worldBuildJob: result.job })
+  },
+
+  resumeWorldBuild: async () => {
+    const job = get().worldBuildJob
+    if (!job?.job_id) return
+    const result = await api.resumeWorldBuild(job.job_id)
+    set({ worldBuildJob: result.job })
+    await waitForWorldBuild(job.job_id, set)
+    await get().loadGraph()
+    await get().loadAgents()
+    await get().refreshStatus()
+    await get().loadSimulations()
+    set({ worldBuildJob: null })
   },
 }))
+
+async function waitForWorldBuild(jobId: string, set: (state: Partial<SimState>) => void) {
+  for (;;) {
+    await new Promise(resolve => window.setTimeout(resolve, 750))
+    const result = await api.fetchWorldBuild(jobId)
+    const job = result.job
+    set({ worldBuildJob: job })
+    if (job.status === 'completed') return job
+    if (job.status === 'failed' || job.status === 'cancelled') {
+      throw new Error(job.error || job.message || 'World build did not complete')
+    }
+  }
+}
 
 // Setup WebSocket listeners. App connects after the auth gate succeeds.
 wsClient.onMessage((msg) => {
@@ -375,6 +422,12 @@ wsClient.onMessage((msg) => {
     useSimStore.setState({
       liveActivity: [...state.liveActivity, msg.data].slice(-50)
     })
+  } else if (msg.type === 'world_build_progress') {
+    if (state.worldBuildJob?.job_id === msg.data.job_id) {
+      useSimStore.setState({
+        worldBuildJob: { ...state.worldBuildJob, ...msg.data, status: 'running' }
+      })
+    }
   } else if (msg.type === 'simulation_switched') {
     useSimStore.setState({
       tickLog: [],

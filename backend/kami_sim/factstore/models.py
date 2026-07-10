@@ -63,6 +63,39 @@ class Simulation(Base):
     )
 
 
+class WorldBuildJob(Base):
+    """Durable progress and checkpoint state for asynchronous world generation."""
+
+    __tablename__ = "world_build_jobs"
+
+    job_id = Column(String, primary_key=True)
+    simulation_id = Column(
+        String, ForeignKey("simulations.id"), nullable=False, unique=True
+    )
+    status = Column(String, nullable=False, default="queued")
+    stage = Column(String, nullable=False, default="queued")
+    completed_units = Column(Integer, nullable=False, default=0)
+    total_units = Column(Integer, nullable=False, default=5)
+    message = Column(Text, nullable=False, default="Queued")
+    request = Column(JSON, nullable=False, default=dict)
+    checkpoint = Column(JSON, nullable=False, default=dict)
+    error_message = Column(Text, nullable=True)
+    cancel_requested = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime, nullable=False, default=_utcnow_naive)
+    updated_at = Column(
+        DateTime,
+        nullable=False,
+        default=_utcnow_naive,
+        onupdate=_utcnow_naive,
+    )
+    completed_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index("ix_world_build_jobs_status_updated", "status", "updated_at"),
+        Index("ix_world_build_jobs_simulation", "simulation_id"),
+    )
+
+
 class LLMCall(Base):
     """Persistent accounting record for an attempted LLM call."""
 

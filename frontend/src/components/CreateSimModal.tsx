@@ -1,8 +1,11 @@
 import { useState } from 'react'
 import { useSimStore } from '../stores/simStore'
+import { Loader2, RotateCcw, Square } from 'lucide-react'
 
 export default function CreateSimModal() {
-  const { openCreateModal, createSim } = useSimStore()
+  const {
+    openCreateModal, createSim, worldBuildJob, cancelWorldBuild, resumeWorldBuild,
+  } = useSimStore()
   const [name, setName] = useState('')
   const [prompt, setPrompt] = useState('')
   const [count, setCount] = useState(10)
@@ -24,20 +27,50 @@ export default function CreateSimModal() {
     }
   }
 
+  const handleResume = async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      await resumeWorldBuild()
+      openCreateModal(false)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to resume world build.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const progress = worldBuildJob
+    ? Math.round((worldBuildJob.completed_units / Math.max(1, worldBuildJob.total_units)) * 100)
+    : 0
+
   return (
-    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
-      <div className="bg-gray-800 p-6 rounded-lg shadow-xl w-full max-w-lg border border-gray-700">
+    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-3">
+      <div className="bg-gray-800 p-6 rounded-lg shadow-xl w-full max-w-lg max-h-[calc(100vh-1.5rem)] overflow-y-auto border border-gray-700">
         <h2 className="text-xl font-bold text-gray-100 mb-4">Create New Simulation</h2>
         
         {loading ? (
           <div className="space-y-4">
             <div className="flex items-center space-x-3 text-indigo-400">
-              <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-              </svg>
-              <span>Building world... This uses LLMs and may take a few minutes.</span>
+              <Loader2 size={20} className="animate-spin shrink-0" />
+              <span>{worldBuildJob?.message || 'Preparing world build...'}</span>
             </div>
+            <div className="h-2 overflow-hidden rounded bg-gray-900">
+              <div className="h-full bg-indigo-500 transition-all" style={{ width: `${progress}%` }} />
+            </div>
+            <div className="flex items-center justify-between text-xs text-gray-400">
+              <span className="capitalize">{String(worldBuildJob?.stage || 'queued').replace('_', ' ')}</span>
+              <span className="tabular-nums">{progress}%</span>
+            </div>
+            {worldBuildJob?.job_id && (
+              <button
+                type="button"
+                onClick={() => cancelWorldBuild().catch(e => setError(String(e)))}
+                className="inline-flex items-center gap-2 text-sm text-rose-300 hover:text-rose-200"
+              >
+                <Square size={14} /> Cancel build
+              </button>
+            )}
           </div>
         ) : (
           <form onSubmit={handleSubmit} className="space-y-4">
@@ -71,13 +104,22 @@ export default function CreateSimModal() {
               <input 
                 type="number"
                 min="2"
-                max="1000"
+                max="100"
                 className="w-full bg-gray-900 border border-gray-700 rounded p-2 text-gray-100 focus:outline-none focus:border-indigo-500"
                 value={count}
                 onChange={e => setCount(parseInt(e.target.value))}
                 required
               />
             </div>
+            {worldBuildJob && ['failed', 'cancelled'].includes(worldBuildJob.status) && (
+              <button
+                type="button"
+                onClick={handleResume}
+                className="inline-flex items-center gap-2 text-sm text-indigo-300 hover:text-indigo-200"
+              >
+                <RotateCcw size={15} /> Resume from checkpoint
+              </button>
+            )}
 
             <div className="flex justify-end space-x-3 pt-4 border-t border-gray-700">
               <button 

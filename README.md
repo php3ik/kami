@@ -118,6 +118,8 @@ ADAPTIVE_TIME_STEPPING=true
 LLM_SOFT_TIMEOUT_SECONDS=45
 LLM_RETRY_ATTEMPTS=2
 LLM_RETRY_BASE_DELAY_SECONDS=0.25
+WORLD_BUILDER_TIMEOUT_SECONDS=180
+WORLD_BUILDER_BATCH_CONCURRENCY=4
 DETERMINISTIC_MODE=false
 DETERMINISTIC_SEED=0
 
@@ -137,6 +139,14 @@ python -m uvicorn kami_sim.api.server:app --host 0.0.0.0 --port 8000
 Deterministic mode forces zero-temperature requests, derives stable provider
 seeds where supported, and generates replayable canonical IDs inside each tick.
 Keep it disabled for normal creative runs and enable it for reproducibility tests.
+
+WorldBuilder runs as a resumable five-stage background job in the API. The CLI
+can also generate and import a world directly:
+
+```bash
+python -m kami_sim.world_builder.build_world --prompt "A remote research town" --agents 20 --output world.json
+python -m kami_sim.world_builder.build_world --prompt "A remote research town" --agents 20 --import-db --simulation-id research-town
+```
 
 Apply database migrations before starting the API:
 

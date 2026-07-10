@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import httpx
@@ -109,7 +110,15 @@ async def test_lifespan_imports_legacy_registry_into_database(tmp_path, monkeypa
                 "/api/sim/create",
                 json={"prompt": "A world that exceeds its cap", "agent_count": 2},
             )
-            assert create_response.status_code == 402
+            assert create_response.status_code == 202
+            job_id = create_response.json()["job"]["job_id"]
+            for _ in range(50):
+                job_response = await client.get(f"/api/world-builds/{job_id}")
+                if job_response.json()["job"]["status"] == "failed":
+                    break
+                await asyncio.sleep(0.01)
+            assert job_response.json()["job"]["status"] == "failed"
+            assert "budget exhausted" in job_response.json()["job"]["error"]
             failed_records = [
                 item
                 for item in server.sim_state["simulation_repository"]

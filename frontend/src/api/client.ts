@@ -249,6 +249,26 @@ export class SimWebSocket {
   }
 }
 
+export async function fetchWorldBuild(jobId: string) {
+  const res = await apiFetch(`${API_BASE}/world-builds/${jobId}`)
+  return parseResponse(res)
+}
+
+export async function fetchWorldBuilds() {
+  const res = await apiFetch(`${API_BASE}/world-builds`)
+  return parseResponse(res)
+}
+
+export async function cancelWorldBuild(jobId: string) {
+  const res = await apiFetch(`${API_BASE}/world-builds/${jobId}/cancel`, { method: 'POST' })
+  return parseResponse(res)
+}
+
+export async function resumeWorldBuild(jobId: string) {
+  const res = await apiFetch(`${API_BASE}/world-builds/${jobId}/resume`, { method: 'POST' })
+  return parseResponse(res)
+}
+
 export async function fetchChannels(agentId?: string) {
   const query = agentId ? `?agent_id=${encodeURIComponent(agentId)}` : ''
   const res = await apiFetch(`${API_BASE}/channels${query}`)

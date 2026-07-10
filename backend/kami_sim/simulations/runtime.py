@@ -106,6 +106,38 @@ class SimulationRunManager:
             raise
         return self._task
 
+    def start_operation(
+        self,
+        action: str,
+        simulation_id: str,
+        callback: Callable[[], Awaitable[Any]],
+    ) -> asyncio.Task:
+        """Run one exclusive non-tick operation in the background."""
+        self._claim(action, simulation_id, running=False)
+
+        async def runner() -> None:
+            try:
+                async with self._lock:
+                    await callback()
+            finally:
+                self._release()
+
+        try:
+            self._task = asyncio.create_task(runner())
+        except Exception:
+            self._release()
+            raise
+        return self._task
+
+    async def cancel_operation(self, simulation_id: str) -> bool:
+        task = self._task
+        if task is None or task.done() or self._simulation_id != simulation_id:
+            return False
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        return True
+
     def pause(self) -> None:
         self._paused = True
 

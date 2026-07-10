@@ -85,6 +85,16 @@ class SimConfig:
             "LLM_RETRY_BASE_DELAY_SECONDS", "0.25"
         )
     )
+    world_builder_timeout_seconds: float = field(
+        default_factory=lambda: _non_negative_float_env(
+            "WORLD_BUILDER_TIMEOUT_SECONDS", "180"
+        )
+    )
+    world_builder_batch_concurrency: int = field(
+        default_factory=lambda: _positive_int_env(
+            "WORLD_BUILDER_BATCH_CONCURRENCY", "4"
+        )
+    )
 
     # Activation
     kami_wake_salience_threshold: float = 0.3
@@ -161,6 +171,8 @@ class SimConfig:
                 "deterministic_seed": (
                     self.deterministic_seed if self.deterministic_mode else None
                 ),
+                "world_builder_timeout_seconds": self.world_builder_timeout_seconds,
+                "world_builder_batch_concurrency": self.world_builder_batch_concurrency,
             },
         }
 

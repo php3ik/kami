@@ -57,6 +57,7 @@ class LLMClient:
         response_format: dict | None = None,
         max_tokens: int = 2048,
         temperature: float = 0.7,
+        timeout_seconds: float | None = None,
     ) -> dict:
         """Make an LLM call with cost tracking.
 
@@ -98,9 +99,14 @@ class LLMClient:
                 component=component,
                 seed=seed,
             )
-            if config.llm_soft_timeout_seconds > 0:
+            timeout = (
+                config.llm_soft_timeout_seconds
+                if timeout_seconds is None
+                else max(0.0, float(timeout_seconds))
+            )
+            if timeout > 0:
                 result = await asyncio.wait_for(
-                    operation, timeout=config.llm_soft_timeout_seconds
+                    operation, timeout=timeout
                 )
             else:
                 result = await operation
