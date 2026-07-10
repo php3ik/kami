@@ -171,6 +171,14 @@ class KamiWorker:
                     "text": inp["text"],
                     "salience": inp.get("salience", 0.3),
                 })
+            elif name == "imprint_on_kami":
+                mutations.append({
+                    "type": "imprint_on_kami",
+                    "kami_id": kami_id,
+                    "fact": inp["fact"],
+                    "importance": inp.get("importance", 0.9),
+                    "category": inp.get("category", "event"),
+                })
             elif name == "update_conversation_thread":
                 mutations.append({
                     "type": "update_conversation_thread",

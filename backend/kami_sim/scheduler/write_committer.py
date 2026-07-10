@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from ..eventbus.bus import EventBus
 from ..factstore import tools as fs
+from ..memory.kami_memory import imprint_on_kami
 from ..spatial.graph import SpatialGraph
 
 logger = logging.getLogger(__name__)
@@ -280,5 +281,17 @@ def _apply_mutation(
         if value is None:
             value = current.get(need, 0.0) + mutation.get("delta", 0.0)
         fs.set_agent_need(session, mutation["agent_id"], need, value, tick)
+    elif mutation_type == "imprint_on_kami":
+        fact = str(mutation.get("fact") or "").strip()
+        source_digest = hashlib.sha256(fact.encode("utf-8")).hexdigest()[:16]
+        imprint_on_kami(
+            session,
+            mutation["kami_id"],
+            fact,
+            tick,
+            importance=mutation.get("importance", 0.9),
+            category=mutation.get("category", "event"),
+            source_event_id=f"tool:{tick}:{source_digest}",
+        )
     else:
         raise ValueError(f"Unknown mutation type: {mutation_type}")

@@ -17,6 +17,7 @@ Rules:
 8. A conversation event must contain new content: a question, refusal, disclosure, practical offer, joke, silence with consequence, or decision. Do not emit "they continue talking" without a new beat.
 9. If agents repeat stalled actions, add friction, create a smaller concrete consequence, or pivot the scene instead of allowing an infinite loop.
 10. Use update_conversation_thread for meaningful conversations, adjust_need when a scene changes hunger/fatigue/stress/social/task_pressure, and update_relation when trust, tension, dependence, or suspicion changes.
+11. Use imprint_on_kami only for rare events that permanently change the place's identity, reputation, or visible physical traces.
 11. emit_event participants must be entity IDs from PRESENT_ENTITIES or directly involved intent targets, never display names.
 12. If no agents are present and only neighbor activity is audible, emit a low-salience idle/background event. Do not narrate an arrival/departure unless move_entity actually happens here.
 13. A target named "unknown", "unfamiliar person", or similar is not real unless it maps to a PRESENT_ENTITIES id. Either block that intent or create a concrete entity before anyone can interact with it.

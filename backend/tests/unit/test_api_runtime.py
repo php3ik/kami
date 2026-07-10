@@ -3,7 +3,19 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from kami_sim.api import server
-from kami_sim.factstore.models import Event, SimulationTick, init_db
+from kami_sim.factstore import tools as fs
+from kami_sim.factstore.models import (
+    AgentMemoryProfile,
+    EpisodicMemoryRecord,
+    Event,
+    KamiImprint,
+    KamiMemoryProfile,
+    KamiMemorySummary,
+    MemorySummary,
+    SemanticInsight,
+    SimulationTick,
+    init_db,
+)
 from kami_sim.simulations import RunConflictError
 
 
@@ -71,5 +83,105 @@ def test_next_tick_prefers_committed_tick_ledger_over_legacy_events():
             session.commit()
 
             assert server._next_tick_from_db(session, "sim-a") == 6
+    finally:
+        engine.dispose()
+
+
+def test_memory_api_payloads_are_scoped_and_structured():
+    engine, factory = init_db("sqlite:///:memory:")
+    try:
+        with factory() as session:
+            kami = fs.create_entity(
+                session,
+                "kami",
+                "Workshop",
+                0,
+                entity_id="sim_a__kami_workshop",
+                simulation_id="a",
+            )
+            agent = fs.create_entity(
+                session,
+                "agent",
+                "Ari",
+                0,
+                entity_id="sim_a__agent_ari",
+                simulation_id="a",
+            )
+            session.add_all(
+                [
+                    EpisodicMemoryRecord(
+                        memory_id="mem_a",
+                        simulation_id="a",
+                        agent_id=agent.entity_id,
+                        tick=2,
+                        content="Ari repaired the radio.",
+                        importance=0.8,
+                        participants=[],
+                        location=kami.entity_id,
+                        event_type="repair",
+                    ),
+                    MemorySummary(
+                        summary_id="sum_a",
+                        simulation_id="a",
+                        agent_id=agent.entity_id,
+                        tick=3,
+                        summary="Ari completed a careful repair.",
+                        candidates=[],
+                    ),
+                    SemanticInsight(
+                        insight_id="ins_a",
+                        simulation_id="a",
+                        agent_id=agent.entity_id,
+                        content="Careful testing prevents failures.",
+                        strength=1.2,
+                        created_tick=3,
+                        last_reinforced_tick=3,
+                        category="self",
+                        status="active",
+                        provenance=[],
+                    ),
+                    AgentMemoryProfile(
+                        agent_id=agent.entity_id,
+                        simulation_id="a",
+                        life_narrative="I restore damaged equipment.",
+                        last_consolidation_tick=3,
+                    ),
+                    KamiMemorySummary(
+                        summary_id="ksum_a",
+                        simulation_id="a",
+                        kami_id=kami.entity_id,
+                        tick=3,
+                        summary="The workshop saw a successful radio repair.",
+                        event_count=1,
+                        peak_salience=0.8,
+                    ),
+                    KamiMemoryProfile(
+                        kami_id=kami.entity_id,
+                        simulation_id="a",
+                        long_term_memory="The repaired radio now works clearly.",
+                        last_consolidation_tick=3,
+                    ),
+                    KamiImprint(
+                        imprint_id="kimp_a",
+                        simulation_id="a",
+                        kami_id=kami.entity_id,
+                        tick=2,
+                        fact="The north workbench is scorched.",
+                        importance=0.95,
+                        category="accident",
+                    ),
+                ]
+            )
+            session.commit()
+
+            agent_payload = server._agent_memory_payload(session, agent)
+            kami_payload = server._kami_memory_payload(session, kami)
+
+        assert agent_payload["episodic"][0]["memory_id"] == "mem_a"
+        assert agent_payload["insights"][0]["status"] == "active"
+        assert agent_payload["life_narrative"].startswith("I restore")
+        assert kami_payload["summaries"][0]["summary_id"] == "ksum_a"
+        assert kami_payload["imprints"][0]["imprint_id"] == "kimp_a"
+        assert "repaired radio" in kami_payload["long_term_memory"]
     finally:
         engine.dispose()

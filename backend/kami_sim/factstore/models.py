@@ -218,6 +218,80 @@ class AgentMemoryProfile(Base):
     )
 
 
+class KamiMemorySummary(Base):
+    """Durable daily compression of one Kami's canonical events."""
+
+    __tablename__ = "kami_memory_summaries"
+
+    summary_id = Column(String, primary_key=True)
+    simulation_id = Column(String, nullable=False)
+    kami_id = Column(String, ForeignKey("entities.entity_id"), nullable=False)
+    tick = Column(Integer, nullable=False)
+    summary = Column(Text, nullable=False)
+    event_count = Column(Integer, nullable=False, default=0)
+    peak_salience = Column(Float, nullable=False, default=0.0)
+    created_at = Column(DateTime, nullable=False, default=_utcnow_naive)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "simulation_id", "kami_id", "tick", name="uq_kami_memory_summary_day"
+        ),
+        Index(
+            "ix_kami_memory_summaries_sim_kami_tick",
+            "simulation_id",
+            "kami_id",
+            "tick",
+        ),
+    )
+
+
+class KamiMemoryProfile(Base):
+    """Bounded long-term context and consolidation cursor for one Kami."""
+
+    __tablename__ = "kami_memory_profiles"
+
+    kami_id = Column(String, ForeignKey("entities.entity_id"), primary_key=True)
+    simulation_id = Column(String, nullable=False)
+    long_term_memory = Column(Text, nullable=False, default="")
+    last_consolidation_tick = Column(Integer, nullable=False, default=-1)
+    updated_at = Column(DateTime, nullable=False, default=_utcnow_naive)
+
+    __table_args__ = (
+        Index("ix_kami_memory_profiles_simulation", "simulation_id"),
+    )
+
+
+class KamiImprint(Base):
+    """Permanent high-salience fact attached to a place."""
+
+    __tablename__ = "kami_imprints"
+
+    imprint_id = Column(String, primary_key=True)
+    simulation_id = Column(String, nullable=False)
+    kami_id = Column(String, ForeignKey("entities.entity_id"), nullable=False)
+    tick = Column(Integer, nullable=False)
+    fact = Column(Text, nullable=False)
+    importance = Column(Float, nullable=False, default=0.9)
+    category = Column(String, nullable=False, default="event")
+    source_event_id = Column(String, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=_utcnow_naive)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "simulation_id",
+            "kami_id",
+            "source_event_id",
+            name="uq_kami_imprint_source",
+        ),
+        Index(
+            "ix_kami_imprints_sim_kami_tick",
+            "simulation_id",
+            "kami_id",
+            "tick",
+        ),
+    )
+
+
 class Entity(Base):
     """Registry of everything that exists in the simulation."""
 

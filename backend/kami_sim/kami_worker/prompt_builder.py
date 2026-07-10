@@ -12,6 +12,7 @@ from typing import Any
 from ..eventbus.bus import EventBus
 from ..factstore.models import Entity
 from ..factstore.tools import get_active_conversations, get_events, query_kami_state
+from ..memory import memory_runtime
 from ..spatial.graph import SpatialGraph
 from sqlalchemy.orm import Session
 from .scene_dynamics import SceneDynamics
@@ -153,6 +154,19 @@ KAMI_TOOLS = [
             "required": ["text", "salience"],
         },
     },
+    {
+        "name": "imprint_on_kami",
+        "description": "Permanently attach a rare, identity-changing fact or physical trace to this place.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "fact": {"type": "string"},
+                "importance": {"type": "number", "minimum": 0.8, "maximum": 1.0},
+                "category": {"type": "string"},
+            },
+            "required": ["fact"],
+        },
+    },
 ]
 
 
@@ -174,8 +188,10 @@ def build_kami_prompt(
     # 2. Kami identity (cached)
     identity = _build_identity(kami_entity)
 
-    # 3. Long-term memory (placeholder for consolidation)
-    ltm = ""
+    # 3. Long-term memory
+    ltm = memory_runtime.kami_prompt_context(
+        kami_id, kami_entity.simulation_id
+    )
 
     # 4. Recent events
     recent_events = get_events(session, kami_id=kami_id, since_tick=max(0, tick - 15), limit=15)

@@ -1,6 +1,6 @@
 from kami_sim.eventbus.bus import EventBus
 from kami_sim.factstore import tools as fs
-from kami_sim.factstore.models import Event, SimulationTick, init_db
+from kami_sim.factstore.models import Event, KamiImprint, SimulationTick, init_db
 from kami_sim.scheduler.write_committer import commit_proposals, stage_proposals
 from kami_sim.spatial.graph import SpatialGraph
 
@@ -102,6 +102,36 @@ def test_staged_events_rollback_with_tick_ledger_transaction():
 
         assert session.query(Event).count() == 0
         assert session.query(SimulationTick).count() == 0
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_imprint_mutation_is_committed_once_per_tick_and_fact():
+    engine, session, graph = _world()
+    mutation = {
+        "type": "imprint_on_kami",
+        "kami_id": "kami_room",
+        "fact": "A deep burn mark crosses the eastern wall.",
+        "importance": 0.95,
+        "category": "fire",
+    }
+    try:
+        _, failures = commit_proposals(
+            session,
+            2,
+            [
+                {"kami_id": "kami_room", "mutations": [mutation]},
+                {"kami_id": "kami_room", "mutations": [mutation]},
+            ],
+            EventBus(),
+            graph,
+        )
+
+        assert failures == []
+        row = session.query(KamiImprint).one()
+        assert row.fact.startswith("A deep burn mark")
+        assert row.category == "fire"
     finally:
         session.close()
         engine.dispose()

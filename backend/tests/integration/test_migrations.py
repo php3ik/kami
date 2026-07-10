@@ -46,6 +46,9 @@ def test_migrations_build_fresh_schema_without_drift(tmp_path):
         "memory_summaries",
         "semantic_insights",
         "agent_memory_profiles",
+        "kami_memory_summaries",
+        "kami_memory_profiles",
+        "kami_imprints",
         "alembic_version",
     } <= tables
     with sqlite3.connect(database_path) as database:

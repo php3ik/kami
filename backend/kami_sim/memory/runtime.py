@@ -12,6 +12,7 @@ from ..factstore.models import Entity
 from ..llm.budget import budget
 from .consolidator import MemoryConsolidator
 from .episodic_store import EpisodicMemory, EpisodicStore
+from .kami_memory import KamiMemoryStore
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,7 @@ class MemoryRuntime:
         self.session_factory = None
         self.episodic = EpisodicStore()
         self.consolidator = MemoryConsolidator()
+        self.kami = KamiMemoryStore()
 
     def configure(
         self,
@@ -32,18 +34,22 @@ class MemoryRuntime:
         if session_factory is None:
             self.episodic = EpisodicStore()
             self.consolidator = MemoryConsolidator()
+            self.kami = KamiMemoryStore()
             return
         self.episodic = EpisodicStore(
             session_factory, chroma_path, vector_backend=vector_backend
         )
         self.consolidator = MemoryConsolidator(session_factory)
+        self.kami = KamiMemoryStore(session_factory)
 
     def stage_events(
         self, session: Session, simulation_id: str, events: list[dict]
     ) -> list[EpisodicMemory]:
         if self.session_factory is None:
             return []
-        return self.episodic.stage_event_memories(session, simulation_id, events)
+        memories = self.episodic.stage_event_memories(session, simulation_id, events)
+        self.kami.stage_event_imprints(session, simulation_id, events)
+        return memories
 
     def index_committed(self, memories: list[EpisodicMemory]) -> None:
         if self.session_factory is None or not memories:
@@ -76,6 +82,9 @@ class MemoryRuntime:
         )
         return memory_text, self.consolidator.get_long_term_text(agent_id)
 
+    def kami_prompt_context(self, kami_id: str, simulation_id: str) -> str:
+        return self.kami.get_prompt_context(kami_id, simulation_id)
+
     async def consolidate_if_due(self, simulation_id: str, tick: int) -> list[dict]:
         if self.session_factory is None:
             return []
@@ -103,26 +112,38 @@ class MemoryRuntime:
             memories = self.episodic.get_day_memories(
                 agent_id, start_tick, tick, simulation_id
             )
+            try:
+                with budget.scope(simulation_id):
+                    result = await self.consolidator.consolidate_day(
+                        agent_id=agent_id,
+                        day_memories=[
+                            {
+                                "tick": memory.tick,
+                                "content": memory.content,
+                                "importance": memory.importance,
+                            }
+                            for memory in memories
+                        ],
+                        persona={
+                            "name": archetype.get("name", agent_id),
+                            "background": archetype.get("background", ""),
+                            "emotion": dict(archetype.get("emotion") or {}),
+                        },
+                        goals=dict(archetype.get("goals") or {}),
+                        current_tick=tick,
+                    )
+                results.append({"agent_id": agent_id, **result})
+            except Exception:
+                logger.exception("Agent memory consolidation failed for %s", agent_id)
+        try:
             with budget.scope(simulation_id):
-                result = await self.consolidator.consolidate_day(
-                    agent_id=agent_id,
-                    day_memories=[
-                        {
-                            "tick": memory.tick,
-                            "content": memory.content,
-                            "importance": memory.importance,
-                        }
-                        for memory in memories
-                    ],
-                    persona={
-                        "name": archetype.get("name", agent_id),
-                        "background": archetype.get("background", ""),
-                        "emotion": dict(archetype.get("emotion") or {}),
-                    },
-                    goals=dict(archetype.get("goals") or {}),
-                    current_tick=tick,
+                kami_results = await self.kami.consolidate_if_due(
+                    simulation_id, tick
                 )
-            results.append({"agent_id": agent_id, **result})
+        except Exception:
+            logger.exception("Kami memory consolidation failed for %s", simulation_id)
+            kami_results = []
+        results.extend({"kind": "kami", **result} for result in kami_results)
         return results
 
     def delete_simulation(self, simulation_id: str) -> None:

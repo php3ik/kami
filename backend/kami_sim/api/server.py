@@ -37,6 +37,9 @@ from ..factstore.models import (
     Entity,
     Event,
     EpisodicMemoryRecord,
+    KamiImprint,
+    KamiMemoryProfile,
+    KamiMemorySummary,
     Location,
     LLMCall,
     Message,
@@ -256,6 +259,144 @@ def _require_active_entity(entity: Entity | None, entity_id: str) -> Entity:
     if entity is None or entity.simulation_id != _active_simulation_id():
         raise HTTPException(status_code=404, detail=f"Entity not found: {entity_id}")
     return entity
+
+
+def _agent_memory_payload(
+    session, entity: Entity, until_tick: int | None = None, include_semantic: bool = True
+) -> dict:
+    episodic_query = session.query(EpisodicMemoryRecord).filter(
+        EpisodicMemoryRecord.simulation_id == entity.simulation_id,
+        EpisodicMemoryRecord.agent_id == entity.entity_id,
+    )
+    summary_query = session.query(MemorySummary).filter(
+        MemorySummary.simulation_id == entity.simulation_id,
+        MemorySummary.agent_id == entity.entity_id,
+    )
+    if until_tick is not None:
+        episodic_query = episodic_query.filter(EpisodicMemoryRecord.tick <= until_tick)
+        summary_query = summary_query.filter(MemorySummary.tick <= until_tick)
+    episodic = episodic_query.order_by(EpisodicMemoryRecord.tick.desc()).limit(50).all()
+    summaries = summary_query.order_by(MemorySummary.tick.desc()).limit(14).all()
+    insights = []
+    profile = None
+    if include_semantic:
+        insights = (
+            session.query(SemanticInsight)
+            .filter(
+                SemanticInsight.simulation_id == entity.simulation_id,
+                SemanticInsight.agent_id == entity.entity_id,
+            )
+            .order_by(
+                SemanticInsight.status.asc(),
+                SemanticInsight.strength.desc(),
+                SemanticInsight.last_reinforced_tick.desc(),
+            )
+            .limit(100)
+            .all()
+        )
+        profile = session.get(AgentMemoryProfile, entity.entity_id)
+        if profile is not None and profile.simulation_id != entity.simulation_id:
+            profile = None
+    return {
+        "episodic": [
+            {
+                "memory_id": row.memory_id,
+                "tick": row.tick,
+                "content": row.content,
+                "importance": float(row.importance),
+                "participants": list(row.participants or []),
+                "location": row.location,
+                "event_type": row.event_type,
+            }
+            for row in episodic
+        ],
+        "summaries": [
+            {
+                "summary_id": row.summary_id,
+                "tick": row.tick,
+                "summary": row.summary,
+                "candidates": list(row.candidates or []),
+            }
+            for row in summaries
+        ],
+        "insights": [
+            {
+                "insight_id": row.insight_id,
+                "content": row.content,
+                "strength": float(row.strength),
+                "category": row.category,
+                "status": row.status,
+                "created_tick": row.created_tick,
+                "last_reinforced_tick": row.last_reinforced_tick,
+                "provenance": list(row.provenance or []),
+            }
+            for row in insights
+        ],
+        "life_narrative": profile.life_narrative if profile else "",
+        "last_consolidation_tick": (
+            profile.last_consolidation_tick if profile else None
+        ),
+        "last_narrative_tick": profile.last_narrative_tick if profile else None,
+    }
+
+
+def _kami_memory_payload(
+    session, entity: Entity, until_tick: int | None = None
+) -> dict:
+    summary_query = session.query(KamiMemorySummary).filter(
+        KamiMemorySummary.simulation_id == entity.simulation_id,
+        KamiMemorySummary.kami_id == entity.entity_id,
+    )
+    imprint_query = session.query(KamiImprint).filter(
+        KamiImprint.simulation_id == entity.simulation_id,
+        KamiImprint.kami_id == entity.entity_id,
+    )
+    if until_tick is not None:
+        summary_query = summary_query.filter(KamiMemorySummary.tick <= until_tick)
+        imprint_query = imprint_query.filter(KamiImprint.tick <= until_tick)
+    summaries = summary_query.order_by(KamiMemorySummary.tick.desc()).limit(30).all()
+    imprints = imprint_query.order_by(
+        KamiImprint.importance.desc(), KamiImprint.tick.desc()
+    ).limit(50).all()
+    profile = session.get(KamiMemoryProfile, entity.entity_id)
+    if (
+        profile is not None
+        and (
+            profile.simulation_id != entity.simulation_id
+            or (
+                until_tick is not None
+                and profile.last_consolidation_tick > until_tick
+            )
+        )
+    ):
+        profile = None
+    return {
+        "long_term_memory": profile.long_term_memory if profile else "",
+        "last_consolidation_tick": (
+            profile.last_consolidation_tick if profile else None
+        ),
+        "summaries": [
+            {
+                "summary_id": row.summary_id,
+                "tick": row.tick,
+                "summary": row.summary,
+                "event_count": row.event_count,
+                "peak_salience": float(row.peak_salience),
+            }
+            for row in summaries
+        ],
+        "imprints": [
+            {
+                "imprint_id": row.imprint_id,
+                "tick": row.tick,
+                "fact": row.fact,
+                "importance": float(row.importance),
+                "category": row.category,
+                "source_event_id": row.source_event_id,
+            }
+            for row in imprints
+        ],
+    }
 
 
 def _record_entity_ids(record: dict, session) -> list[str]:
@@ -1305,6 +1446,9 @@ async def delete_simulation(simulation_id: str):
         scoped_models = (
             SimulationTick,
             LLMCall,
+            KamiMemoryProfile,
+            KamiImprint,
+            KamiMemorySummary,
             AgentMemoryProfile,
             SemanticInsight,
             MemorySummary,
@@ -1482,19 +1626,22 @@ async def get_kami(kami_id: str):
             raise HTTPException(status_code=404, detail="Kami not found")
         state = fs.query_kami_state(session, kami_id)
         events = fs.get_events(session, kami_id=kami_id, limit=1000)
+        event_payload = [
+            {
+                "event_id": e.event_id,
+                "tick": e.tick,
+                "event_type": e.event_type,
+                "narrative": e.narrative,
+                "salience": e.salience,
+                "participants": e.participants,
+            }
+            for e in events
+        ]
         return {
             **state,
-            "recent_events": [
-                {
-                    "event_id": e.event_id,
-                    "tick": e.tick,
-                    "event_type": e.event_type,
-                    "narrative": e.narrative,
-                    "salience": e.salience,
-                    "participants": e.participants,
-                }
-                for e in events
-            ],
+            "recent_events": event_payload,
+            "memory": _kami_memory_payload(session, kami_entity),
+            "trace": {"events": event_payload[:100]},
         }
     finally:
         session.close()
@@ -1543,6 +1690,8 @@ async def get_agent(agent_id: str):
                     "narrative": e.narrative
                 })
         action_history = action_history[:20]
+        thought_payload = list(reversed(recent_thoughts))
+        memory_payload = _agent_memory_payload(session, entity)
 
         return {
             "entity_id": entity.entity_id,
@@ -1564,8 +1713,21 @@ async def get_agent(agent_id: str):
             ],
             "beliefs": [{"kind": b.kind, "value": b.believed_value, "confidence": b.confidence} for b in beliefs],
             "beliefs_count": len(beliefs),
-            "recent_thoughts": recent_thoughts,
+            "recent_thoughts": thought_payload,
             "action_history": action_history,
+            "memory": memory_payload,
+            "trace": {
+                "thoughts": thought_payload,
+                "actions": action_history,
+                "beliefs": [
+                    {
+                        "kind": belief.kind,
+                        "value": belief.believed_value,
+                        "confidence": belief.confidence,
+                    }
+                    for belief in beliefs
+                ],
+            },
         }
     finally:
         session.close()
@@ -1821,6 +1983,13 @@ async def get_timeline_snapshot(kind: str, entity_id: str, tick: int):
                 "beliefs": [{"kind": b.kind, "value": b.believed_value, "confidence": b.confidence} for b in fs.get_beliefs(session, entity_id)],
                 "recent_thoughts": recent_thoughts,
                 "action_history": action_history,
+                "memory": _agent_memory_payload(
+                    session, entity, until_tick=tick, include_semantic=False
+                ),
+                "trace": {
+                    "thoughts": recent_thoughts,
+                    "actions": action_history,
+                },
             }
 
         if kind == "kami":
@@ -1860,6 +2029,10 @@ async def get_timeline_snapshot(kind: str, entity_id: str, tick: int):
                 }
                 for e in fs.get_events(session, kami_id=entity_id, until_tick=tick, limit=50)
             ]
+            state["memory"] = _kami_memory_payload(
+                session, entity, until_tick=tick
+            )
+            state["trace"] = {"events": state["recent_events"]}
             return state
 
         return {"error": "invalid kind"}

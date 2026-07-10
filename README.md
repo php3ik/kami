@@ -10,6 +10,7 @@ The core idea is to separate subjective cognition from objective reality. Agents
 - Multiple saved simulation worlds with switching, deletion, population/count/cost summaries, and isolated world data inside the shared database.
 - Atomic tick commits with durable idempotency records, failed-attempt recovery, and restart-safe clock restoration.
 - Persistent, simulation-isolated agent memory with episodic recall, daily summaries, semantic insights, and life narratives.
+- Durable Kami memory with daily place histories, bounded prompt context, and permanent high-salience imprints.
 - Multi-provider LLM routing for Anthropic, OpenAI, and Gemini, with cheap/strong model tiers.
 - In-app settings panel for LLM provider, model names, API tokens, and image-generation model settings.
 - Tick-based simulation with agent cognition, Kami scene resolution, state mutation, event logging, and WebSocket updates.
@@ -146,6 +147,10 @@ Nightly reflection integrates daily experiences into provenance-bearing
 insights, conservative goal changes, and decayed emotional load. Weak stale
 insights are archived, while the life narrative and challenge pass run on the
 configured weekly cadence.
+Canonical Kami events are consolidated once per in-sim day into spatial
+history. Events with salience `>=0.9`, or events carrying an explicit
+`payload.imprint`, become permanent place facts and remain visible in the Kami
+prompt and inspector.
 
 Set `KAMI_API_TOKEN` to require authentication for REST and WebSocket access.
 When it is empty, authentication is disabled for local development. The browser
