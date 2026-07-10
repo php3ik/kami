@@ -12,6 +12,7 @@ import uuid
 from pathlib import Path
 
 from ..factstore import tools as fs
+from ..memory.episodic_store import seed_archetype_memories
 from ..spatial.graph import SpatialGraph
 
 from .dynamic_world import build_dynamic_world
@@ -94,7 +95,20 @@ def load_world_into_db(session, data: dict, simulation_id: str | None = None) ->
         if a.get("work"):
             a["work"] = scoped_id(a["work"])
         
-        fs.create_entity(session, kind="agent", canonical_name=a["name"], tick=0, archetype=a, entity_id=agent_id)
+        agent_entity = fs.create_entity(
+            session,
+            kind="agent",
+            canonical_name=a["name"],
+            tick=0,
+            archetype=a,
+            entity_id=agent_id,
+        )
+        seed_archetype_memories(
+            session,
+            agent_entity,
+            list(a.get("memories") or []),
+            life_narrative=str(a.get("life_narrative") or ""),
+        )
         # Attempt to bind agent to their native home
         kami_id = a.get("home") if a.get("home") in kami_ids else data["kami_specs"][0].get("entity_id")
         fs.place_entity(session, agent_id, kami_id, tick=0)

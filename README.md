@@ -9,6 +9,7 @@ The core idea is to separate subjective cognition from objective reality. Agents
 - Dynamic world creation from a natural-language prompt, including characters, Kamis, objects, relationships, biographies, and local history.
 - Multiple saved simulation worlds with switching, deletion, population/count/cost summaries, and isolated world data inside the shared database.
 - Atomic tick commits with durable idempotency records, failed-attempt recovery, and restart-safe clock restoration.
+- Persistent, simulation-isolated agent memory with episodic recall, daily summaries, semantic insights, and life narratives.
 - Multi-provider LLM routing for Anthropic, OpenAI, and Gemini, with cheap/strong model tiers.
 - In-app settings panel for LLM provider, model names, API tokens, and image-generation model settings.
 - Tick-based simulation with agent cognition, Kami scene resolution, state mutation, event logging, and WebSocket updates.
@@ -107,6 +108,8 @@ GEMINI_API_KEY=...
 DATABASE_URL=sqlite:///./kami_sim.db
 KAMI_API_TOKEN=
 SIMULATION_BUDGET_USD=0
+CHROMA_PATH=./chroma_data
+MEMORY_VECTOR_BACKEND=sql
 
 LLM_PROVIDER=openai
 CHEAP_MODEL=gpt-5.4-mini
@@ -135,6 +138,10 @@ On first startup, records from `simulations_registry.json` are imported into
 the `simulations` table. The JSON file is not used for subsequent runtime writes.
 Committed ticks are recorded in `simulation_ticks`; state mutations, canonical
 events, the tick result, and the next clock value are committed together.
+Agent memories are stored durably in SQL and retrieved with a deterministic
+local hybrid ranker by default. Set `MEMORY_VECTOR_BACKEND=chroma` to enable a
+simulation-owned Chroma index after its native backend passes an upsert smoke
+test on the deployment host. SQL remains the source of truth in both modes.
 
 Set `KAMI_API_TOKEN` to require authentication for REST and WebSocket access.
 When it is empty, authentication is disabled for local development. The browser

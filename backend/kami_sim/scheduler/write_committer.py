@@ -90,6 +90,7 @@ def stage_proposals(
                     )
                     proposal_events.append({
                         "event_id": event.event_id,
+                        "tick": event.tick,
                         "kami_id": event.kami_id,
                         "event_type": event.event_type,
                         "narrative": event.narrative,

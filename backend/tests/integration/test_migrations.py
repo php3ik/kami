@@ -42,6 +42,10 @@ def test_migrations_build_fresh_schema_without_drift(tmp_path):
         "simulations",
         "llm_calls",
         "simulation_ticks",
+        "episodic_memories",
+        "memory_summaries",
+        "semantic_insights",
+        "agent_memory_profiles",
         "alembic_version",
     } <= tables
     with sqlite3.connect(database_path) as database:

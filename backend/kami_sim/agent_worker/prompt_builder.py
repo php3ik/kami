@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from ..factstore import tools as fs
 from ..factstore.models import Entity
+from ..memory import memory_runtime
 from .containment import filter_perception
 
 
@@ -117,10 +118,26 @@ def build_agent_prompt(
 
     # 5. Relevant memories (placeholder — Phase 4)
     recent_intents = fs.get_recent_intents(session, agent_id=agent_entity.entity_id, limit=6)
-    memories = _format_recent_intents(recent_intents) or "No significant intent outcomes yet."
-
-    # 6. Semantic insights (placeholder — Phase 4)
-    insights = ""
+    intent_memories = _format_recent_intents(recent_intents)
+    present_agent_ids = [
+        entity["entity_id"]
+        for entity in kami_state.get("entities", [])
+        if entity.get("kind") == "agent"
+    ]
+    memory_query = " ".join(
+        str(event.get("narrative") or "")
+        for event in (recent_personal_events or [])[-3:]
+    )
+    episodic_memories, long_term_memory = memory_runtime.prompt_context(
+        agent_id=agent_entity.entity_id,
+        query=memory_query,
+        present_agents=present_agent_ids,
+        current_tick=tick,
+        simulation_id=agent_entity.simulation_id,
+    )
+    memories = "\n".join(
+        block for block in (episodic_memories, intent_memories) if block
+    ) or "No significant memories are currently salient."
 
     # 7. Social graph slice
     social_relations = fs.get_relations(session, agent_entity.entity_id, direction="both")
@@ -162,13 +179,13 @@ def build_agent_prompt(
 ### Current Needs
 {needs_block}
 
-### Recent Intent Outcomes
+### Relevant Memories
 {memories}
 
 ### Active Social Threads
 {threads_block or "No active thread involving you here."}
 
-{f'### Insights{chr(10)}{insights}' if insights else ''}
+{f'### Long-Term Understanding{chr(10)}{long_term_memory}' if long_term_memory else ''}
 
 ### People You Know (present or relevant)
 {social_block or "You don't know anyone here."}

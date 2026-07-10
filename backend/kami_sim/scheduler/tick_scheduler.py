@@ -19,6 +19,7 @@ from ..factstore import tools as fs
 from ..factstore.models import Simulation, SimulationTick
 from ..kami_worker.worker import KamiWorker
 from ..llm.budget import budget
+from ..memory import memory_runtime
 from ..spatial.graph import SpatialGraph
 from .activity_detector import detect_active_agents, detect_active_kami
 from .conflict_resolver import order_intents_by_initiative
@@ -135,6 +136,7 @@ class TickScheduler:
                 "failed_mutations": [],
             }
             self._commit_tick(session, tick, result)
+            await self._consolidate_memory(tick)
             return result
 
         # === COMPUTE PHASE 1: Agent cognition (parallel) ===
@@ -248,6 +250,9 @@ class TickScheduler:
         staged = stage_proposals(
             session, tick, proposals, self.spatial_graph,
         )
+        staged_memories = memory_runtime.stage_events(
+            session, self._simulation_scope(), staged.events
+        )
 
         # Build tick result
         narratives = {}
@@ -265,6 +270,7 @@ class TickScheduler:
             "monologues": all_monologues,
         }
         self._commit_tick(session, tick, result)
+        memory_runtime.index_committed(staged_memories)
 
         # === PROPAGATE PHASE ===
         # These notifications are ephemeral. Canonical state is already durable,
@@ -279,7 +285,16 @@ class TickScheduler:
             self._propagate_committed_events(staged.events, tick)
         except Exception:
             logger.exception("Post-commit event propagation failed for tick %s", tick)
+        await self._consolidate_memory(tick)
         return result
+
+    async def _consolidate_memory(self, tick: int) -> None:
+        try:
+            await memory_runtime.consolidate_if_due(
+                self._simulation_scope(), tick
+            )
+        except Exception:
+            logger.exception("Post-commit memory consolidation failed for tick %s", tick)
 
     def _simulation_scope(self) -> str:
         return self.simulation_id or "default"

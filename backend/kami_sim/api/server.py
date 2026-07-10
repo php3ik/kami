@@ -31,23 +31,28 @@ from ..factstore.models import (
     AgentBelief,
     AgentIntentRecord,
     AgentNeed,
+    AgentMemoryProfile,
     ConversationThread,
     Channel,
     Entity,
     Event,
+    EpisodicMemoryRecord,
     Location,
     LLMCall,
     Message,
+    MemorySummary,
     Ownership,
     PhysicalState,
     ReadReceipt,
     Relation,
     Schedule,
+    SemanticInsight,
     SimulationTick,
     init_db,
 )
 from ..llm.budget import BudgetExceededError, budget
 from ..llm.client import llm_client
+from ..memory import memory_runtime
 from ..scheduler.tick_scheduler import TickScheduler
 from ..simulations import (
     RunConflictError,
@@ -1052,6 +1057,11 @@ async def lifespan(app: FastAPI):
     engine, session_factory = init_db(config.database_url)
     sim_state["session_factory"] = session_factory
     budget.configure(session_factory, config.simulation_budget_usd)
+    memory_runtime.configure(
+        session_factory,
+        config.chroma_path,
+        vector_backend=config.memory_vector_backend,
+    )
     repository = SimulationRepository(session_factory)
     sim_state["simulation_repository"] = repository
     imported = repository.import_legacy_registry(legacy_registry)
@@ -1104,6 +1114,7 @@ async def lifespan(app: FastAPI):
     await run_manager.shutdown()
     engine.dispose()
     budget.configure(None, config.simulation_budget_usd)
+    memory_runtime.configure(None)
 
 
 app = FastAPI(title="Kami Simulation", lifespan=lifespan)
@@ -1294,6 +1305,10 @@ async def delete_simulation(simulation_id: str):
         scoped_models = (
             SimulationTick,
             LLMCall,
+            AgentMemoryProfile,
+            SemanticInsight,
+            MemorySummary,
+            EpisodicMemoryRecord,
             ReadReceipt,
             Message,
             Channel,
@@ -1319,6 +1334,7 @@ async def delete_simulation(simulation_id: str):
         raise
     finally:
         session.close()
+    memory_runtime.delete_simulation(simulation_id)
     registry["simulations"] = [item for item in simulations if item.get("id") != simulation_id]
     _write_registry(registry)
     return {"status": "deleted"}

@@ -13,19 +13,7 @@ def add_insight(
     category: str = "",
 ) -> Insight:
     """Add a new L2 insight for an agent."""
-    import uuid
-    state = consolidator.get_state(agent_id)
-    insight = Insight(
-        insight_id=f"ins_{uuid.uuid4().hex[:8]}",
-        agent_id=agent_id,
-        content=content,
-        strength=1.0,
-        created_tick=tick,
-        last_reinforced_tick=tick,
-        category=category,
-    )
-    state.insights.append(insight)
-    return insight
+    return consolidator.add_insight(agent_id, content, tick, category)
 
 
 def strengthen_insight(
@@ -35,13 +23,9 @@ def strengthen_insight(
     tick: int,
     amount: float = 0.3,
 ) -> bool:
-    state = consolidator.get_state(agent_id)
-    for ins in state.insights:
-        if ins.insight_id == insight_id:
-            ins.strength = min(2.0, ins.strength + amount)
-            ins.last_reinforced_tick = tick
-            return True
-    return False
+    return consolidator.strengthen_insight(
+        agent_id, insight_id, tick, amount
+    )
 
 
 def archive_insight(
@@ -49,6 +33,4 @@ def archive_insight(
     agent_id: str,
     insight_id: str,
 ) -> bool:
-    state = consolidator.get_state(agent_id)
-    state.insights = [i for i in state.insights if i.insight_id != insight_id]
-    return True
+    return consolidator.archive_insight(agent_id, insight_id)

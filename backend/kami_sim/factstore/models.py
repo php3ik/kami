@@ -116,6 +116,106 @@ class SimulationTick(Base):
     )
 
 
+class EpisodicMemoryRecord(Base):
+    """Durable L0 episodic memory; Chroma is a rebuildable search index."""
+
+    __tablename__ = "episodic_memories"
+
+    memory_id = Column(String, primary_key=True)
+    simulation_id = Column(String, nullable=False)
+    agent_id = Column(String, ForeignKey("entities.entity_id"), nullable=False)
+    tick = Column(Integer, nullable=False)
+    content = Column(Text, nullable=False)
+    importance = Column(Float, nullable=False, default=0.5)
+    participants = Column(JSON, nullable=False, default=list)
+    location = Column(String, nullable=False, default="")
+    event_type = Column(String, nullable=False, default="")
+    source_event_id = Column(String, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=_utcnow_naive)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "simulation_id",
+            "agent_id",
+            "source_event_id",
+            name="uq_episodic_memory_source",
+        ),
+        Index(
+            "ix_episodic_memories_sim_agent_tick",
+            "simulation_id",
+            "agent_id",
+            "tick",
+        ),
+    )
+
+
+class MemorySummary(Base):
+    """Durable L1 daily summary."""
+
+    __tablename__ = "memory_summaries"
+
+    summary_id = Column(String, primary_key=True)
+    simulation_id = Column(String, nullable=False)
+    agent_id = Column(String, ForeignKey("entities.entity_id"), nullable=False)
+    tick = Column(Integer, nullable=False)
+    summary = Column(Text, nullable=False)
+    candidates = Column(JSON, nullable=False, default=list)
+    created_at = Column(DateTime, nullable=False, default=_utcnow_naive)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "simulation_id", "agent_id", "tick", name="uq_memory_summary_day"
+        ),
+        Index(
+            "ix_memory_summaries_sim_agent_tick",
+            "simulation_id",
+            "agent_id",
+            "tick",
+        ),
+    )
+
+
+class SemanticInsight(Base):
+    """Durable L2 semantic insight."""
+
+    __tablename__ = "semantic_insights"
+
+    insight_id = Column(String, primary_key=True)
+    simulation_id = Column(String, nullable=False)
+    agent_id = Column(String, ForeignKey("entities.entity_id"), nullable=False)
+    content = Column(Text, nullable=False)
+    strength = Column(Float, nullable=False, default=1.0)
+    created_tick = Column(Integer, nullable=False, default=0)
+    last_reinforced_tick = Column(Integer, nullable=False, default=0)
+    category = Column(String, nullable=False, default="")
+    status = Column(String, nullable=False, default="active")
+
+    __table_args__ = (
+        Index(
+            "ix_semantic_insights_sim_agent_status",
+            "simulation_id",
+            "agent_id",
+            "status",
+        ),
+    )
+
+
+class AgentMemoryProfile(Base):
+    """Durable L3 narrative and consolidation cursor."""
+
+    __tablename__ = "agent_memory_profiles"
+
+    agent_id = Column(String, ForeignKey("entities.entity_id"), primary_key=True)
+    simulation_id = Column(String, nullable=False)
+    life_narrative = Column(Text, nullable=False, default="")
+    last_consolidation_tick = Column(Integer, nullable=False, default=0)
+    updated_at = Column(DateTime, nullable=False, default=_utcnow_naive)
+
+    __table_args__ = (
+        Index("ix_memory_profiles_simulation", "simulation_id"),
+    )
+
+
 class Entity(Base):
     """Registry of everything that exists in the simulation."""
 

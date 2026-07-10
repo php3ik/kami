@@ -69,6 +69,8 @@ class SimConfig:
 
     # Database
     database_url: str = os.getenv("DATABASE_URL", "sqlite:///./kami_sim.db")
+    chroma_path: str = os.getenv("CHROMA_PATH", "./chroma_data")
+    memory_vector_backend: str = os.getenv("MEMORY_VECTOR_BACKEND", "sql").strip().lower()
 
     # HTTP
     cors_origins: tuple[str, ...] = field(

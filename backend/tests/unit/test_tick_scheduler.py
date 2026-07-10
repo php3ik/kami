@@ -1,7 +1,13 @@
 import pytest
 
 from kami_sim.factstore import tools as fs
-from kami_sim.factstore.models import Event, SimulationTick, init_db
+from kami_sim.factstore.models import (
+    EpisodicMemoryRecord,
+    Event,
+    SimulationTick,
+    init_db,
+)
+from kami_sim.memory import memory_runtime
 from kami_sim.scheduler import tick_scheduler as scheduler_module
 from kami_sim.scheduler.tick_scheduler import TickScheduler
 from kami_sim.simulations import SimulationRepository
@@ -101,10 +107,19 @@ async def test_post_commit_broadcast_failure_does_not_retry_canonical_tick(monke
             entity_id="sim_sim-a__kami_room",
             simulation_id="sim-a",
         )
+        fs.create_entity(
+            session,
+            "agent",
+            "Ari",
+            0,
+            entity_id="sim_sim-a__agent_ari",
+            simulation_id="sim-a",
+        )
         session.commit()
     graph = SpatialGraph()
     graph.add_kami("sim_sim-a__kami_room", name="Room", kind="room")
     scheduler = TickScheduler(factory, graph, simulation_id="sim-a")
+    memory_runtime.configure(factory)
 
     class FakeKamiWorker:
         def __init__(self, *args, **kwargs):
@@ -118,6 +133,7 @@ async def test_post_commit_broadcast_failure_does_not_retry_canonical_tick(monke
                     "event_type": "idle",
                     "narrative": "The room settles.",
                     "salience": 0.1,
+                    "participants": ["sim_sim-a__agent_ari"],
                 }],
                 "broadcasts": [{"text": "A sound", "salience": 0.2}],
             }
@@ -139,11 +155,13 @@ async def test_post_commit_broadcast_failure_does_not_retry_canonical_tick(monke
 
         with factory() as session:
             assert session.query(Event).count() == 1
+            assert session.query(EpisodicMemoryRecord).count() == 1
             tick_record = session.query(SimulationTick).one()
         assert "error" not in result[0]
         assert scheduler.current_tick == 1
         assert tick_record.status == "committed"
     finally:
+        memory_runtime.configure(None)
         engine.dispose()
 
 
