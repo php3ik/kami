@@ -3,7 +3,7 @@ import pytest
 from kami_sim.agent_worker.prompt_builder import build_agent_prompt
 from kami_sim.config import config
 from kami_sim.factstore import tools as fs
-from kami_sim.factstore.models import EpisodicMemoryRecord, init_db
+from kami_sim.factstore.models import EpisodicMemoryRecord, SemanticInsight, init_db
 from kami_sim.memory import memory_runtime
 from kami_sim.memory.consolidator import MemoryConsolidator
 from kami_sim.memory.episodic_store import EpisodicMemory, EpisodicStore
@@ -300,4 +300,147 @@ async def test_nightly_runtime_consolidates_only_agents_with_scoped_memories(
         )
     finally:
         runtime.configure(None)
+        engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_reflection_pipeline_persists_goals_emotion_narrative_and_provenance(
+    monkeypatch,
+):
+    engine, factory = _memory_world()
+    consolidator = MemoryConsolidator(factory)
+    with factory() as session:
+        agent = session.get(fs.Entity, "sim_alpha__agent_ari")
+        agent.archetype = {
+            "goals": {"current": "Repair the radio."},
+            "emotion": {"dominant": "anxious", "intensity": 0.8},
+        }
+        session.commit()
+    existing = consolidator.add_insight(
+        "sim_alpha__agent_ari", "Working alone is always safer.", 0
+    )
+
+    async def fake_summary(*args, **kwargs):
+        return {
+            "summary": "Ari accepted careful help during the repair.",
+            "candidate_insights": ["Trust can make difficult repairs safer."],
+        }
+
+    async def fake_call(*args, **kwargs):
+        if kwargs.get("tools"):
+            return {
+                "content": "",
+                "tool_calls": [
+                    {
+                        "name": "integrate_insights",
+                        "input": {
+                            "operations": [
+                                {
+                                    "action": "modify",
+                                    "insight_id": existing.insight_id,
+                                    "content": "Trusted help can make difficult work safer.",
+                                    "source_candidate": "Trust can make difficult repairs safer.",
+                                }
+                            ]
+                        },
+                    }
+                ],
+            }
+        system = str(kwargs.get("system") or "")
+        if "goal hierarchy" in system:
+            return {
+                "content": '{"updates":{"current":"Finish the repair with Ben."}}',
+                "tool_calls": [],
+            }
+        return {
+            "content": (
+                '{"life_narrative":"I repair what matters and now accept trusted help.",'
+                f'"insight_operations":[{{"action":"strengthen",'
+                f'"insight_id":"{existing.insight_id}","amount":0.2}}]}}'
+            ),
+            "tool_calls": [],
+        }
+
+    monkeypatch.setattr(consolidator, "_summarize_day", fake_summary)
+    monkeypatch.setattr(consolidator, "_llm_available", lambda tier="strong": True)
+    monkeypatch.setattr("kami_sim.memory.consolidator.llm_client.call", fake_call)
+    monkeypatch.setattr(config, "tick_in_sim_minutes", 1440)
+    monkeypatch.setattr(config, "consolidation_phase_5_interval_days", 1)
+    try:
+        result = await consolidator.consolidate_day(
+            "sim_alpha__agent_ari",
+            [
+                {
+                    "tick": 0,
+                    "content": "Ben steadied the radio while Ari repaired it.",
+                    "importance": 0.9,
+                }
+            ],
+            {
+                "name": "Ari",
+                "background": "A careful repairer.",
+                "emotion": {"dominant": "anxious", "intensity": 0.8},
+            },
+            {"current": "Repair the radio."},
+            0,
+        )
+
+        state = consolidator.get_state("sim_alpha__agent_ari")
+        with factory() as session:
+            agent = session.get(fs.Entity, "sim_alpha__agent_ari")
+            archetype = dict(agent.archetype or {})
+
+        assert result["life_narrative_updated"] is True
+        assert state.life_narrative.startswith("I repair what matters")
+        assert state.last_narrative_tick == 0
+        assert state.insights[0].content == (
+            "Trusted help can make difficult work safer."
+        )
+        assert [item["action"] for item in state.insights[0].provenance][-2:] == [
+            "modify",
+            "strengthen",
+        ]
+        assert archetype["goals"]["current"] == "Finish the repair with Ben."
+        assert archetype["emotion"]["intensity"] == 0.72
+        assert "Ben steadied the radio" in archetype["emotion"]["last_trigger"]
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_stale_weak_insight_decays_into_archive(monkeypatch):
+    engine, factory = _memory_world()
+    consolidator = MemoryConsolidator(factory)
+    insight = consolidator.add_insight(
+        "sim_alpha__agent_ari", "This belief has gone stale.", 0
+    )
+    state = consolidator.get_state("sim_alpha__agent_ari")
+    state.insights[0].strength = 0.25
+    consolidator._save_state("sim_alpha__agent_ari", state)
+
+    async def fake_summary(*args, **kwargs):
+        return {"summary": "A quiet day.", "candidate_insights": []}
+
+    monkeypatch.setattr(consolidator, "_summarize_day", fake_summary)
+    monkeypatch.setattr(consolidator, "_llm_available", lambda tier="strong": False)
+    monkeypatch.setattr(config, "tick_in_sim_minutes", 1440)
+    monkeypatch.setattr(config, "insight_decay_days_without_reinforcement", 1)
+    monkeypatch.setattr(config, "consolidation_phase_5_interval_days", 7)
+    try:
+        await consolidator.consolidate_day(
+            "sim_alpha__agent_ari",
+            [{"tick": 1, "content": "Nothing reinforced the belief."}],
+            {"name": "Ari", "emotion": {}},
+            {},
+            1,
+        )
+
+        restarted = consolidator.get_state("sim_alpha__agent_ari")
+        with factory() as session:
+            row = session.get(SemanticInsight, insight.insight_id)
+        assert restarted.insights == []
+        assert restarted.archived_insights[0].insight_id == insight.insight_id
+        assert row.status == "archived"
+        assert row.provenance[-1]["action"] == "decay"
+    finally:
         engine.dispose()

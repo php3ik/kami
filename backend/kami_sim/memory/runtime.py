@@ -107,12 +107,17 @@ class MemoryRuntime:
                 result = await self.consolidator.consolidate_day(
                     agent_id=agent_id,
                     day_memories=[
-                        {"tick": memory.tick, "content": memory.content}
+                        {
+                            "tick": memory.tick,
+                            "content": memory.content,
+                            "importance": memory.importance,
+                        }
                         for memory in memories
                     ],
                     persona={
                         "name": archetype.get("name", agent_id),
                         "background": archetype.get("background", ""),
+                        "emotion": dict(archetype.get("emotion") or {}),
                     },
                     goals=dict(archetype.get("goals") or {}),
                     current_tick=tick,

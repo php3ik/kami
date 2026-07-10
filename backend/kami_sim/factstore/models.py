@@ -189,6 +189,7 @@ class SemanticInsight(Base):
     last_reinforced_tick = Column(Integer, nullable=False, default=0)
     category = Column(String, nullable=False, default="")
     status = Column(String, nullable=False, default="active")
+    provenance = Column(JSON, nullable=False, default=list)
 
     __table_args__ = (
         Index(
@@ -209,6 +210,7 @@ class AgentMemoryProfile(Base):
     simulation_id = Column(String, nullable=False)
     life_narrative = Column(Text, nullable=False, default="")
     last_consolidation_tick = Column(Integer, nullable=False, default=0)
+    last_narrative_tick = Column(Integer, nullable=False, default=-1)
     updated_at = Column(DateTime, nullable=False, default=_utcnow_naive)
 
     __table_args__ = (

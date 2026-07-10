@@ -28,6 +28,17 @@ def strengthen_insight(
     )
 
 
+def modify_insight(
+    consolidator: MemoryConsolidator,
+    agent_id: str,
+    insight_id: str,
+    content: str,
+    tick: int,
+) -> bool:
+    """Modify an L2 insight while preserving its provenance."""
+    return consolidator.modify_insight(agent_id, insight_id, content, tick)
+
+
 def archive_insight(
     consolidator: MemoryConsolidator,
     agent_id: str,

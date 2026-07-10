@@ -142,6 +142,10 @@ Agent memories are stored durably in SQL and retrieved with a deterministic
 local hybrid ranker by default. Set `MEMORY_VECTOR_BACKEND=chroma` to enable a
 simulation-owned Chroma index after its native backend passes an upsert smoke
 test on the deployment host. SQL remains the source of truth in both modes.
+Nightly reflection integrates daily experiences into provenance-bearing
+insights, conservative goal changes, and decayed emotional load. Weak stale
+insights are archived, while the life narrative and challenge pass run on the
+configured weekly cadence.
 
 Set `KAMI_API_TOKEN` to require authentication for REST and WebSocket access.
 When it is empty, authentication is disabled for local development. The browser
