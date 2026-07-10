@@ -16,6 +16,7 @@ from ..comms.channels import expire_ringing_calls, get_forced_wake_agents
 from ..comms.inbox import process_read
 from ..agent_worker.worker import AgentCognitionWorker
 from ..config import config
+from ..determinism import tick_metadata, tick_scope
 from ..eventbus.bus import EventBus
 from ..factstore import tools as fs
 from ..factstore.models import Simulation, SimulationTick
@@ -89,7 +90,9 @@ class TickScheduler:
                 }
                 tick_cost_before = budget.get_tick_cost(tick, self.simulation_id)
                 cost_tracking_started = True
-                with budget.scope(self.simulation_id):
+                with budget.scope(self.simulation_id), tick_scope(
+                    self._simulation_scope(), tick
+                ):
                     if skipped_ticks:
                         tick_result = await self._run_tick(
                             session,
@@ -144,6 +147,8 @@ class TickScheduler:
                     "skipped_ticks": max(0, tick - requested_tick),
                     "elapsed_ticks": max(0, tick - requested_tick) + 1,
                     "next_tick": tick + 1,
+                    "determinism": tick_metadata(self._simulation_scope(), tick),
+                    "fallbacks": {"agents": 0, "kami": 0, "total": 0},
                 }
                 self._record_tick_failure(tick, tick_result)
                 self.tick_log.append(tick_result)
@@ -209,6 +214,8 @@ class TickScheduler:
                 "narratives": {},
                 "failed_mutations": [],
                 "transit": transit_transitions,
+                "determinism": tick_metadata(self._simulation_scope(), tick),
+                "fallbacks": {"agents": 0, "kami": 0, "total": 0},
             }, time_context)
             staged_memories = memory_runtime.stage_events(
                 session, self._simulation_scope(), transit_events
@@ -224,8 +231,8 @@ class TickScheduler:
         all_monologues: dict[str, str] = {}
 
         agent_tasks = []
-        for kami_id, agent_ids in agents_by_kami.items():
-            for agent_id in agent_ids:
+        for kami_id in sorted(agents_by_kami):
+            for agent_id in sorted(agents_by_kami[kami_id]):
                 # Get recent personal events
                 recent = fs.get_events(
                     session, kami_id=kami_id,
@@ -243,16 +250,32 @@ class TickScheduler:
         agent_coros = []
         for kami_id, agent_id, recent in agent_tasks:
             async def think_task(k_id, a_id, r):
-                if progress_callback:
-                    await progress_callback({"type": "progress", "data": {"step": "agent_think_start", "agent_id": a_id, "kami_id": k_id}})
-                res = await agent_worker.think(
-                    agent_id=a_id,
-                    kami_id=k_id,
-                    tick=tick,
-                    recent_personal_events=r,
-                )
-                if progress_callback:
-                    await progress_callback({"type": "progress", "data": {"step": "agent_think_end", "agent_id": a_id, "kami_id": k_id, "inner_monologue": res.get("inner_monologue", "")}})
+                await self._report_progress(progress_callback, {
+                    "step": "agent_think_start",
+                    "agent_id": a_id,
+                    "kami_id": k_id,
+                })
+                try:
+                    res = await agent_worker.think(
+                        agent_id=a_id,
+                        kami_id=k_id,
+                        tick=tick,
+                        recent_personal_events=r,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Agent worker crashed for %s at tick %s; using fallback",
+                        a_id,
+                        tick,
+                    )
+                    res = agent_worker.fallback(a_id, reason="worker_error")
+                await self._report_progress(progress_callback, {
+                    "step": "agent_think_end",
+                    "agent_id": a_id,
+                    "kami_id": k_id,
+                    "inner_monologue": res.get("inner_monologue", ""),
+                    "fallback": bool(res.get("fallback")),
+                })
                 return k_id, a_id, res
             agent_coros.append(think_task(kami_id, agent_id, recent))
 
@@ -320,12 +343,27 @@ class TickScheduler:
 
         for kami_id in active_kami:
             async def render_task(k_id):
-                if progress_callback:
-                    await progress_callback({"type": "progress", "data": {"step": "kami_render_start", "kami_id": k_id}})
+                await self._report_progress(progress_callback, {
+                    "step": "kami_render_start", "kami_id": k_id
+                })
                 ints = order_intents_by_initiative(all_intents.get(k_id, []), tick)
-                res = await kami_worker.render_tick(k_id, tick, ints)
-                if progress_callback:
-                    await progress_callback({"type": "progress", "data": {"step": "kami_render_end", "kami_id": k_id, "narrative": res.get("narrative", "")}})
+                try:
+                    res = await kami_worker.render_tick(k_id, tick, ints)
+                except Exception:
+                    logger.exception(
+                        "Kami worker crashed for %s at tick %s; using fallback",
+                        k_id,
+                        tick,
+                    )
+                    res = kami_worker.fallback(
+                        k_id, tick, ints, reason="worker_error"
+                    )
+                await self._report_progress(progress_callback, {
+                    "step": "kami_render_end",
+                    "kami_id": k_id,
+                    "narrative": res.get("narrative", ""),
+                    "fallback": bool(res.get("fallback")),
+                })
                 res["kami_id"] = k_id
                 return res
             kami_coros.append(render_task(kami_id))
@@ -349,6 +387,11 @@ class TickScheduler:
         narratives = {}
         for p in proposals:
             narratives[p["kami_id"]] = p.get("narrative", "")
+        agent_fallbacks = sum(
+            1 for _, _, worker_result in agent_results
+            if worker_result.get("fallback")
+        )
+        kami_fallbacks = sum(1 for proposal in proposals if proposal.get("fallback"))
 
         result = self._with_time_context({
             "tick": tick,
@@ -360,6 +403,12 @@ class TickScheduler:
             "narratives": narratives,
             "monologues": all_monologues,
             "transit": transit_transitions,
+            "determinism": tick_metadata(self._simulation_scope(), tick),
+            "fallbacks": {
+                "agents": agent_fallbacks,
+                "kami": kami_fallbacks,
+                "total": agent_fallbacks + kami_fallbacks,
+            },
         }, time_context)
         self._commit_tick(session, tick, result)
         memory_runtime.index_committed(staged_memories)
@@ -379,6 +428,15 @@ class TickScheduler:
             logger.exception("Post-commit event propagation failed for tick %s", tick)
         await self._consolidate_memory(tick)
         return result
+
+    @staticmethod
+    async def _report_progress(callback, data: dict) -> None:
+        if callback is None:
+            return
+        try:
+            await callback({"type": "progress", "data": data})
+        except Exception:
+            logger.exception("Tick progress callback failed at step %s", data.get("step"))
 
     async def _consolidate_memory(self, tick: int) -> None:
         try:

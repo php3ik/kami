@@ -91,7 +91,8 @@ class AgentCognitionWorker:
             )
         except Exception as e:
             logger.error(f"LLM call failed for agent {agent_id} tick {tick}: {e}")
-            return self._fallback(agent_id, reason=str(e))
+            reason = "timeout" if isinstance(e, TimeoutError) else "llm_error"
+            return self.fallback(agent_id, reason=reason)
 
         # Parse response
         result = self._parse_response(response, agent_id, agent_entity)
@@ -166,18 +167,14 @@ class AgentCognitionWorker:
             "intents": intents,
             "beliefs": beliefs,
             "inner_monologue": inner_monologue,
+            "fallback": False,
         }
 
-    def _fallback(self, agent_id: str, reason: str | None = None) -> dict:
+    def fallback(self, agent_id: str, reason: str | None = None) -> dict:
         inner_monologue = "I pause, unable to gather my thoughts clearly this moment."
         if reason:
-            if "insufficient_quota" in reason or "exceeded your current quota" in reason:
-                reason = "OpenAI quota is exhausted"
-            elif "rate_limit" in reason or "429" in reason:
-                reason = "LLM rate limit"
-            else:
-                reason = "LLM request failed"
-            inner_monologue = f"{inner_monologue} [{reason}]"
+            label = "LLM request timed out" if reason == "timeout" else "LLM request failed"
+            inner_monologue = f"{inner_monologue} [{label}]"
         return {
             "agent_id": agent_id,
             "intents": [{
@@ -191,4 +188,10 @@ class AgentCognitionWorker:
             "beliefs": [],
             "processed_message_ids": [],
             "inner_monologue": inner_monologue,
+            "fallback": True,
+            "fallback_reason": reason or "worker_error",
         }
+
+    def _fallback(self, agent_id: str, reason: str | None = None) -> dict:
+        """Backward-compatible private alias used by older callers."""
+        return self.fallback(agent_id, reason)

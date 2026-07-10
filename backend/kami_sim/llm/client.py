@@ -6,6 +6,7 @@ and prompt caching.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -13,6 +14,7 @@ from typing import Any
 import anthropic
 
 from ..config import config
+from ..determinism import request_seed
 from .budget import budget
 
 logger = logging.getLogger(__name__)
@@ -62,18 +64,19 @@ class LLMClient:
         """
         provider, model = self._get_model(tier)
         qualified_model = f"{provider}:{model}"
+        request_payload = {
+            "messages": messages,
+            "system": system,
+            "tools": tools,
+            "response_format": response_format,
+        }
         payload_bytes = len(
             json.dumps(
-                {
-                    "messages": messages,
-                    "system": system,
-                    "tools": tools,
-                    "response_format": response_format,
-                },
-                ensure_ascii=False,
-                default=str,
+                request_payload, ensure_ascii=False, sort_keys=True, default=str
             ).encode("utf-8")
         )
+        seed = request_seed(component, tick, request_payload)
+        effective_temperature = 0.0 if config.deterministic_mode else temperature
         reservation_id = budget.reserve_call(
             qualified_model,
             # One token cannot encode less than one payload byte. The fixed
@@ -83,42 +86,24 @@ class LLMClient:
         )
 
         try:
-            if provider == "anthropic":
-                result = await self._call_anthropic(
-                    model,
-                    messages,
-                    system,
-                    tools,
-                    response_format,
-                    max_tokens,
-                    temperature,
-                    component,
-                )
-            elif provider == "openai":
-                result = await self._call_openai(
-                    model,
-                    messages,
-                    system,
-                    tools,
-                    response_format,
-                    max_tokens,
-                    temperature,
-                    component,
-                )
-            elif provider == "gemini":
-                result = await self._call_gemini(
-                    model,
-                    messages,
-                    system,
-                    tools,
-                    max_tokens,
-                    temperature,
-                    component,
+            operation = self._call_with_retries(
+                provider=provider,
+                model=model,
+                messages=messages,
+                system=system,
+                tools=tools,
+                response_format=response_format,
+                max_tokens=max_tokens,
+                temperature=effective_temperature,
+                component=component,
+                seed=seed,
+            )
+            if config.llm_soft_timeout_seconds > 0:
+                result = await asyncio.wait_for(
+                    operation, timeout=config.llm_soft_timeout_seconds
                 )
             else:
-                raise ValueError(
-                    f"Unknown LLM provider: {provider}. Use anthropic, openai, or gemini."
-                )
+                result = await operation
         except Exception as exc:
             try:
                 budget.record_failure(
@@ -150,6 +135,78 @@ class LLMClient:
 
         return result
 
+    async def _call_with_retries(
+        self,
+        *,
+        provider: str,
+        model: str,
+        messages: list[dict],
+        system: str | list[dict],
+        tools: list[dict] | None,
+        response_format: dict | None,
+        max_tokens: int,
+        temperature: float,
+        component: str,
+        seed: int | None,
+    ) -> dict:
+        attempts = max(1, config.llm_retry_attempts)
+        for attempt in range(1, attempts + 1):
+            try:
+                return await self._dispatch_provider_call(
+                    provider=provider,
+                    model=model,
+                    messages=messages,
+                    system=system,
+                    tools=tools,
+                    response_format=response_format,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    component=component,
+                    seed=seed,
+                )
+            except Exception as exc:
+                if attempt >= attempts or not self._is_transient_error(exc):
+                    raise
+                delay = config.llm_retry_base_delay_seconds * (2 ** (attempt - 1))
+                logger.warning(
+                    "Retrying transient LLM failure (%s, attempt %s/%s): %s",
+                    component,
+                    attempt + 1,
+                    attempts,
+                    type(exc).__name__,
+                )
+                if delay > 0:
+                    await asyncio.sleep(delay)
+        raise RuntimeError("LLM retry loop exhausted")
+
+    async def _dispatch_provider_call(self, **kwargs) -> dict:
+        provider = kwargs.pop("provider")
+        if provider == "anthropic":
+            return await self._call_anthropic(**kwargs)
+        if provider == "openai":
+            return await self._call_openai(**kwargs)
+        if provider == "gemini":
+            kwargs.pop("response_format", None)
+            return await self._call_gemini(**kwargs)
+        raise ValueError(
+            f"Unknown LLM provider: {provider}. Use anthropic, openai, or gemini."
+        )
+
+    @staticmethod
+    def _is_transient_error(exc: Exception) -> bool:
+        if isinstance(exc, (TimeoutError, ConnectionError)):
+            return True
+        status = getattr(exc, "status_code", None)
+        if status in {408, 409, 425, 429} or (
+            isinstance(status, int) and status >= 500
+        ):
+            return True
+        name = type(exc).__name__.lower()
+        return any(
+            marker in name
+            for marker in ("timeout", "ratelimit", "connection", "serviceunavailable")
+        )
+
     async def _call_anthropic(
         self,
         model: str,
@@ -160,6 +217,7 @@ class LLMClient:
         max_tokens: int,
         temperature: float,
         component: str,
+        seed: int | None = None,
     ) -> dict:
         if self._anthropic_client is None:
             self._anthropic_client = anthropic.AsyncAnthropic(
@@ -240,6 +298,7 @@ class LLMClient:
         max_tokens: int,
         temperature: float,
         component: str,
+        seed: int | None = None,
     ) -> dict:
         if self._openai_client is None:
             from openai import AsyncOpenAI
@@ -269,6 +328,8 @@ class LLMClient:
             )
         if not self._openai_uses_default_temperature(model):
             kwargs["temperature"] = temperature
+        if seed is not None:
+            kwargs["seed"] = seed
         if tools:
             kwargs["tools"] = [self._anthropic_tool_to_openai(t) for t in tools]
             if component == "WorldBuilder" and len(tools) == 1:
@@ -284,13 +345,15 @@ class LLMClient:
         try:
             response = await self._openai_client.chat.completions.create(**kwargs)
         except Exception as e:
-            if "reasoning_effort" in kwargs:
+            rejected_controls = self._rejected_openai_controls(e, kwargs)
+            if rejected_controls:
                 logger.warning(
-                    "Retrying OpenAI call without reasoning_effort (%s): %s",
+                    "Retrying OpenAI call without unsupported controls %s (%s)",
+                    sorted(rejected_controls),
                     component,
-                    e,
                 )
-                kwargs.pop("reasoning_effort", None)
+                for control in rejected_controls:
+                    kwargs.pop(control, None)
                 response = await self._openai_client.chat.completions.create(**kwargs)
             else:
                 logger.error(f"LLM call failed ({component}): {e}")
@@ -333,6 +396,7 @@ class LLMClient:
         max_tokens: int,
         temperature: float,
         component: str,
+        seed: int | None = None,
     ) -> dict:
         if self._gemini_client is None:
             from google import genai
@@ -361,6 +425,7 @@ class LLMClient:
             temperature=temperature,
             max_output_tokens=max_tokens,
             tools=tool_config,
+            seed=seed,
         )
 
         try:
@@ -412,6 +477,15 @@ class LLMClient:
     def _openai_uses_reasoning_controls(self, model: str) -> bool:
         lowered = model.lower()
         return lowered.startswith(("gpt-5", "o1", "o3", "o4"))
+
+    @staticmethod
+    def _rejected_openai_controls(exc: Exception, kwargs: dict) -> set[str]:
+        message = str(exc).lower()
+        rejected = set()
+        for control in ("reasoning_effort", "seed"):
+            if control in kwargs and control in message:
+                rejected.add(control)
+        return rejected
 
     def _anthropic_tool_to_gemini(self, tool: dict):
         from google.genai import types

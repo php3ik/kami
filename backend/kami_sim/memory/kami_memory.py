@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import uuid
 from datetime import UTC, datetime
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..config import config
+from ..determinism import generate_id
 from ..factstore.models import (
     Entity,
     Event,
@@ -53,7 +53,7 @@ def imprint_on_kami(
     scope = simulation_id or kami.simulation_id
     if scope != kami.simulation_id:
         raise ValueError("Cannot imprint another simulation")
-    seed = source_event_id or uuid.uuid4().hex
+    seed = source_event_id or generate_id("imprint_seed_", 32)
     imprint_id = "kimp_" + hashlib.sha256(
         f"{scope}:{kami_id}:{seed}".encode("utf-8")
     ).hexdigest()[:24]

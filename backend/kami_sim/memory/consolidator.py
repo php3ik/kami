@@ -6,11 +6,11 @@ import hashlib
 import json
 import logging
 import re
-import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from ..config import config
+from ..determinism import generate_id
 from ..factstore.models import (
     AgentMemoryProfile,
     Entity,
@@ -395,7 +395,7 @@ INSIGHTS:
                     self._save_state(agent_id, state)
                 return existing
         insight = Insight(
-            insight_id=f"ins_{uuid.uuid4().hex[:12]}",
+            insight_id=generate_id("ins_"),
             agent_id=agent_id,
             content=candidate,
             strength=1.0,
@@ -450,7 +450,7 @@ INSIGHTS:
                     continue
                 state.insights.append(
                     Insight(
-                        insight_id=f"ins_{uuid.uuid4().hex[:12]}",
+                        insight_id=generate_id("ins_"),
                         agent_id=agent_id,
                         content=content[:4000],
                         strength=1.0,
@@ -677,7 +677,7 @@ INSIGHTS:
             raise ValueError("Insight content cannot be empty")
         state = self.get_state(agent_id)
         insight = Insight(
-            insight_id=f"ins_{uuid.uuid4().hex[:12]}",
+            insight_id=generate_id("ins_"),
             agent_id=agent_id,
             content=value[:4000],
             strength=1.0,

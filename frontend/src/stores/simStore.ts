@@ -12,6 +12,8 @@ interface SimState {
   paused: boolean
   totalCostUsd: number
   totalCalls: number
+  deterministicMode: boolean
+  deterministicSeed: number | null
 
   // Graph & Entitites
   graph: { nodes: any[]; edges: any[] }
@@ -70,6 +72,8 @@ export const useSimStore = create<SimState>((set, get) => ({
   paused: true,
   totalCostUsd: 0,
   totalCalls: 0,
+  deterministicMode: false,
+  deterministicSeed: null,
   graph: { nodes: [], edges: [] },
   agents: [],
   simulations: [],
@@ -100,6 +104,8 @@ export const useSimStore = create<SimState>((set, get) => ({
       paused: status.paused,
       totalCostUsd: status.budget?.total_cost_usd ?? 0,
       totalCalls: status.budget?.total_calls ?? 0,
+      deterministicMode: Boolean(status.determinism?.enabled),
+      deterministicSeed: status.determinism?.seed ?? null,
       activeSimulationId: status.active_simulation_id ?? null,
     })
   },

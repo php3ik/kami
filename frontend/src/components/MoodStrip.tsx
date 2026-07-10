@@ -1,8 +1,11 @@
 import { useSimStore } from '../stores/simStore'
-import { Activity, Clock, Cpu, DollarSign, FastForward } from 'lucide-react'
+import { Activity, Binary, Clock, Cpu, DollarSign, FastForward } from 'lucide-react'
 
 export default function MoodStrip() {
-  const { currentTick, simTimeMinutes, timeMode, lastSkippedTicks, running, paused, totalCostUsd, totalCalls } = useSimStore()
+  const {
+    currentTick, simTimeMinutes, timeMode, lastSkippedTicks, running, paused,
+    totalCostUsd, totalCalls, deterministicMode, deterministicSeed,
+  } = useSimStore()
 
   const simMinutes = simTimeMinutes
   const simHours = Math.floor(simMinutes / 60)
@@ -25,6 +28,16 @@ export default function MoodStrip() {
             <FastForward size={14} className="text-cyan-300" />
             <span className="text-cyan-200">Sparse</span>
             <span className="text-white font-semibold tabular-nums">+{lastSkippedTicks}</span>
+          </div>
+        )}
+        {deterministicMode && (
+          <div
+            className="flex items-center gap-2 px-2.5 py-1 rounded border border-violet-800 bg-violet-950/30"
+            title={`Deterministic scheduler seed ${deterministicSeed}`}
+          >
+            <Binary size={14} className="text-violet-300" />
+            <span className="text-violet-200">Seeded</span>
+            <span className="text-white font-semibold tabular-nums">{deterministicSeed}</span>
           </div>
         )}
         <div className="flex items-center gap-2 px-2.5 py-1 rounded border border-slate-800 bg-slate-900/80">

@@ -1477,6 +1477,14 @@ async def get_status():
         "operation": runtime["operation"],
         "budget": budget.get_summary(active_id),
         "active_simulation_id": active_id,
+        "determinism": {
+            "enabled": config.deterministic_mode,
+            "seed": config.deterministic_seed if config.deterministic_mode else None,
+        },
+        "llm_resilience": {
+            "soft_timeout_seconds": config.llm_soft_timeout_seconds,
+            "retry_attempts": config.llm_retry_attempts,
+        },
     }
 
 

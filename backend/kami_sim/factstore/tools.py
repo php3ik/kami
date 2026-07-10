@@ -5,12 +5,12 @@ All world mutations go through these functions. No free-text mutation allowed.
 
 from __future__ import annotations
 
-import uuid
 from typing import Any
 
 from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
+from ..determinism import generate_id
 from .models import (
     VALID_ATTRIBUTES,
     VALID_REL_TYPES,
@@ -32,7 +32,7 @@ from .models import (
 
 
 def _gen_id(prefix: str = "") -> str:
-    return f"{prefix}{uuid.uuid4().hex[:12]}"
+    return generate_id(prefix)
 
 
 def simulation_id_from_scoped_id(value: str | None) -> str:

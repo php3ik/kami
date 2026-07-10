@@ -89,7 +89,8 @@ class KamiWorker:
             )
         except Exception as e:
             logger.error(f"LLM call failed for kami {kami_id} tick {tick}: {e}")
-            result = self._fallback_result(kami_id, tick, agent_intents)
+            reason = "timeout" if isinstance(e, TimeoutError) else "llm_error"
+            result = self._fallback_result(kami_id, tick, agent_intents, reason)
             self._append_comms_intents(result, agent_intents)
             return apply_scene_guardrails(
                 result, scene_dynamics, kami_id, tick, agent_intents
@@ -97,6 +98,7 @@ class KamiWorker:
 
         # Parse tool calls into propose-list
         result = self._parse_response(response, kami_id, tick, agent_intents)
+        result["fallback"] = False
         self._append_comms_intents(result, agent_intents)
         return apply_scene_guardrails(
             result, scene_dynamics, kami_id, tick, agent_intents
@@ -360,9 +362,27 @@ class KamiWorker:
         return list(dict.fromkeys(normalized))
 
     def _fallback_result(
-        self, kami_id: str, tick: int, agent_intents: list[dict] | None = None
+        self,
+        kami_id: str,
+        tick: int,
+        agent_intents: list[dict] | None = None,
+        reason: str = "worker_error",
     ) -> dict:
-        return self._deterministic_resolution(kami_id, tick, agent_intents or [], "")
+        result = self._deterministic_resolution(kami_id, tick, agent_intents or [], "")
+        result["fallback"] = True
+        result["fallback_reason"] = reason
+        return result
+
+    def fallback(
+        self,
+        kami_id: str,
+        tick: int,
+        agent_intents: list[dict] | None = None,
+        reason: str = "worker_error",
+    ) -> dict:
+        result = self._fallback_result(kami_id, tick, agent_intents, reason)
+        self._append_comms_intents(result, agent_intents or [])
+        return result
 
     def _deterministic_resolution(
         self, kami_id: str, tick: int, agent_intents: list[dict], fallback_text: str

@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import uuid
-
 from sqlalchemy.orm import Session
 
 from ..config import config
+from ..determinism import generate_id
 from ..factstore import tools as fs
 from ..factstore.models import Channel, Entity, Message, MessageDelivery, ReadReceipt
 from .wake_logic import determine_delivery_mode
@@ -52,7 +51,7 @@ def create_channel(
         if entity is None or entity.kind != "agent":
             raise ValueError(f"Channel member {entity_id} is not an agent")
     channel = Channel(
-        channel_id=f"chan_{uuid.uuid4().hex[:10]}",
+        channel_id=generate_id("chan_", 10),
         simulation_id=simulation_id,
         kind=kind,
         participants=participants,
@@ -94,7 +93,7 @@ def send_message(
     _enforce_group_rate_limit(session, channel, sender_id, tick)
 
     message = Message(
-        message_id=f"msg_{uuid.uuid4().hex[:10]}",
+        message_id=generate_id("msg_", 10),
         simulation_id=channel.simulation_id,
         channel_id=channel_id,
         sender_id=sender_id,

@@ -200,3 +200,108 @@ async def test_failed_tick_is_recorded_and_retry_commits_same_ledger_row(monkeyp
         assert record.error_message is None
     finally:
         engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_worker_crashes_use_fallbacks_and_commit_tick(monkeypatch):
+    engine, factory = init_db("sqlite:///:memory:")
+    kami_id = "sim_sim-a__kami_room"
+    agent_id = "sim_sim-a__agent_ari"
+    with factory() as session:
+        fs.create_entity(
+            session,
+            "kami",
+            "Room",
+            0,
+            entity_id=kami_id,
+            simulation_id="sim-a",
+        )
+        fs.create_entity(
+            session,
+            "agent",
+            "Ari",
+            0,
+            entity_id=agent_id,
+            simulation_id="sim-a",
+        )
+        fs.place_entity(session, agent_id, kami_id, 0)
+        session.commit()
+
+    class CrashingAgentWorker:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def think(self, **kwargs):
+            raise RuntimeError("prompt assembly failed")
+
+        def fallback(self, requested_agent_id, reason=None):
+            return {
+                "agent_id": requested_agent_id,
+                "intents": [{
+                    "agent_id": requested_agent_id,
+                    "agent_name": "Ari",
+                    "action_type": "wait",
+                    "target": "",
+                    "params": {},
+                    "salience": 0.1,
+                }],
+                "beliefs": [],
+                "processed_message_ids": [],
+                "inner_monologue": "fallback",
+                "fallback": True,
+                "fallback_reason": reason,
+            }
+
+    class CrashingKamiWorker:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def render_tick(self, *args, **kwargs):
+            raise RuntimeError("scene parsing failed")
+
+        def fallback(self, requested_kami_id, tick, intents, reason=None):
+            return {
+                "narrative": "The room holds steady.",
+                "mutations": [],
+                "events": [{
+                    "kami_id": requested_kami_id,
+                    "tick": tick,
+                    "event_type": "idle",
+                    "narrative": "The room holds steady.",
+                    "salience": 0.1,
+                    "participants": [agent_id],
+                    "payload": {"fallback_resolution": True},
+                }],
+                "broadcasts": [],
+                "fallback": True,
+                "fallback_reason": reason,
+            }
+
+    graph = SpatialGraph()
+    graph.add_kami(kami_id, name="Room", kind="room")
+    scheduler = TickScheduler(factory, graph, simulation_id="sim-a")
+    monkeypatch.setattr(
+        scheduler_module, "detect_active_kami", lambda *args, **kwargs: {kami_id}
+    )
+    monkeypatch.setattr(
+        scheduler_module,
+        "detect_active_agents",
+        lambda *args, **kwargs: {kami_id: [agent_id]},
+    )
+    monkeypatch.setattr(scheduler_module, "AgentCognitionWorker", CrashingAgentWorker)
+    monkeypatch.setattr(scheduler_module, "KamiWorker", CrashingKamiWorker)
+    memory_runtime.configure(factory)
+    try:
+        result = await scheduler.run(num_ticks=1)
+
+        with factory() as session:
+            tick_record = session.query(SimulationTick).one()
+            event_count = session.query(Event).count()
+        assert "error" not in result[0]
+        assert result[0]["fallbacks"] == {"agents": 1, "kami": 1, "total": 2}
+        assert result[0]["monologues"][agent_id] == "fallback"
+        assert tick_record.status == "committed"
+        assert event_count == 1
+    finally:
+        memory_runtime.configure(None)
+        engine.dispose()

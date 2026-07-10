@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import uuid
-
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from ..factstore import tools as fs
+from ..determinism import generate_id
 from ..factstore.models import Entity, Event, TransitJourney
 from .graph import SpatialGraph
 
@@ -79,7 +78,7 @@ def begin_transit(
         raise ValueError(f"Agent already has active journey {existing.journey_id}")
     ensure_transit_entity(session, simulation_id, tick)
     journey = TransitJourney(
-        journey_id=f"journey_{uuid.uuid4().hex[:12]}",
+        journey_id=generate_id("journey_"),
         simulation_id=simulation_id,
         entity_id=entity_id,
         from_kami_id=location.kami_id,

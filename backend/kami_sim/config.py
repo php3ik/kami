@@ -33,6 +33,23 @@ def _non_negative_float_env(name: str, default: str = "0") -> float:
     return value
 
 
+def _positive_int_env(name: str, default: str) -> int:
+    try:
+        value = int(os.getenv(name, default))
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+    if value < 1:
+        raise ValueError(f"{name} must be at least 1")
+    return value
+
+
+def _int_env(name: str, default: str) -> int:
+    try:
+        return int(os.getenv(name, default))
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+
+
 def _bool_env(name: str, default: str = "true") -> bool:
     value = os.getenv(name, default).strip().lower()
     if value in {"1", "true", "yes", "on"}:
@@ -48,6 +65,25 @@ class SimConfig:
     tick_in_sim_minutes: int = 1
     adaptive_time_stepping: bool = field(
         default_factory=lambda: _bool_env("ADAPTIVE_TIME_STEPPING", "true")
+    )
+
+    # Reproducibility and provider resilience
+    deterministic_mode: bool = field(
+        default_factory=lambda: _bool_env("DETERMINISTIC_MODE", "false")
+    )
+    deterministic_seed: int = field(
+        default_factory=lambda: _int_env("DETERMINISTIC_SEED", "0")
+    )
+    llm_soft_timeout_seconds: float = field(
+        default_factory=lambda: _non_negative_float_env("LLM_SOFT_TIMEOUT_SECONDS", "45")
+    )
+    llm_retry_attempts: int = field(
+        default_factory=lambda: _positive_int_env("LLM_RETRY_ATTEMPTS", "2")
+    )
+    llm_retry_base_delay_seconds: float = field(
+        default_factory=lambda: _non_negative_float_env(
+            "LLM_RETRY_BASE_DELAY_SECONDS", "0.25"
+        )
     )
 
     # Activation
@@ -118,6 +154,14 @@ class SimConfig:
                 "supported_providers": sorted(VALID_IMAGE_PROVIDERS),
             },
             "supported_providers": sorted(VALID_LLM_PROVIDERS),
+            "runtime": {
+                "soft_timeout_seconds": self.llm_soft_timeout_seconds,
+                "retry_attempts": self.llm_retry_attempts,
+                "deterministic": self.deterministic_mode,
+                "deterministic_seed": (
+                    self.deterministic_seed if self.deterministic_mode else None
+                ),
+            },
         }
 
     def update_llm_settings(

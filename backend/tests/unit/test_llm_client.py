@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import asyncio
 
 import pytest
 
@@ -177,3 +178,111 @@ async def test_call_persists_provider_failure(monkeypatch):
         assert call.cost_usd == 0
     finally:
         engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_call_soft_timeout_is_recorded_and_cancels_provider(monkeypatch):
+    engine, factory = init_db("sqlite:///:memory:")
+    tracker = BudgetTracker()
+    tracker.configure(factory)
+    monkeypatch.setattr(client_module, "budget", tracker)
+    monkeypatch.setattr(config, "llm_provider", "openai")
+    monkeypatch.setattr(config, "cheap_model_name", "gpt-test")
+    monkeypatch.setattr(config, "llm_soft_timeout_seconds", 0.01)
+    monkeypatch.setattr(config, "llm_retry_attempts", 1)
+    client = LLMClient()
+
+    async def slow_call(*args, **kwargs):
+        await asyncio.sleep(1)
+
+    monkeypatch.setattr(client, "_call_openai", slow_call)
+    try:
+        with tracker.scope("sim-a"), pytest.raises(TimeoutError):
+            await client.call(
+                [{"role": "user", "content": "hello"}],
+                component="AgentWorker",
+                tick=3,
+            )
+
+        with factory() as session:
+            call = session.query(LLMCall).one()
+        assert call.status == "failed"
+        assert call.error_type == "TimeoutError"
+        assert tracker._reservations == {}
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_transient_failure_retries_inside_single_logical_call(monkeypatch):
+    engine, factory = init_db("sqlite:///:memory:")
+    tracker = BudgetTracker()
+    tracker.configure(factory)
+    monkeypatch.setattr(client_module, "budget", tracker)
+    monkeypatch.setattr(config, "llm_provider", "openai")
+    monkeypatch.setattr(config, "cheap_model_name", "gpt-test")
+    monkeypatch.setattr(config, "llm_soft_timeout_seconds", 1)
+    monkeypatch.setattr(config, "llm_retry_attempts", 2)
+    monkeypatch.setattr(config, "llm_retry_base_delay_seconds", 0)
+    client = LLMClient()
+    attempts = 0
+
+    async def flaky_call(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise TimeoutError("temporary")
+        return {
+            "content": "ok",
+            "tool_calls": [],
+            "usage": {"input_tokens": 2, "output_tokens": 1},
+        }
+
+    monkeypatch.setattr(client, "_call_openai", flaky_call)
+    try:
+        with tracker.scope("sim-a"):
+            result = await client.call(
+                [{"role": "user", "content": "hello"}],
+                component="AgentWorker",
+            )
+
+        with factory() as session:
+            calls = session.query(LLMCall).all()
+        assert result["content"] == "ok"
+        assert attempts == 2
+        assert len(calls) == 1
+        assert calls[0].status == "completed"
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_deterministic_mode_forces_temperature_and_provider_seed(monkeypatch):
+    tracker = BudgetTracker()
+    monkeypatch.setattr(client_module, "budget", tracker)
+    monkeypatch.setattr(config, "llm_provider", "openai")
+    monkeypatch.setattr(config, "cheap_model_name", "gpt-test")
+    monkeypatch.setattr(config, "deterministic_mode", True)
+    monkeypatch.setattr(config, "deterministic_seed", 19)
+    monkeypatch.setattr(config, "llm_soft_timeout_seconds", 1)
+    client = LLMClient()
+    captured = {}
+
+    async def fake_call(*args, **kwargs):
+        captured.update(kwargs)
+        return {
+            "content": "ok",
+            "tool_calls": [],
+            "usage": {"input_tokens": 2, "output_tokens": 1},
+        }
+
+    monkeypatch.setattr(client, "_call_openai", fake_call)
+    await client.call(
+        [{"role": "user", "content": "hello"}],
+        component="AgentWorker",
+        tick=4,
+        temperature=0.9,
+    )
+
+    assert captured["temperature"] == 0
+    assert isinstance(captured["seed"], int)
