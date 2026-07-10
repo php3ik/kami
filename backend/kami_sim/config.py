@@ -77,6 +77,7 @@ class SimConfig:
             "http://localhost:5173,http://127.0.0.1:5173",
         )
     )
+    api_token: str = field(default_factory=lambda: os.getenv("KAMI_API_TOKEN", "").strip())
 
     # API keys
     anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")

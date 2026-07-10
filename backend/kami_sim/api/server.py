@@ -11,13 +11,15 @@ import json
 import logging
 import math
 import re
+import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 import uuid
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -96,6 +98,39 @@ def _ensure_runtime_idle(action: str) -> None:
             status_code=409,
             detail=str(exc),
         ) from exc
+
+
+def _is_valid_api_token(candidate: str | None) -> bool:
+    configured = config.api_token
+    if not configured:
+        return True
+    return bool(candidate) and secrets.compare_digest(candidate, configured)
+
+
+def _http_api_token(request: Request) -> str | None:
+    authorization = request.headers.get("authorization", "")
+    scheme, _, value = authorization.partition(" ")
+    if scheme.lower() == "bearer" and value:
+        return value.strip()
+    return request.headers.get("x-api-key")
+
+
+def _websocket_api_token(websocket: WebSocket) -> str | None:
+    protocols = [
+        item.strip()
+        for item in websocket.headers.get("sec-websocket-protocol", "").split(",")
+    ]
+    encoded = next(
+        (item.removeprefix("token.") for item in protocols if item.startswith("token.")),
+        None,
+    )
+    if not encoded:
+        return None
+    try:
+        padding = "=" * (-len(encoded) % 4)
+        return base64.urlsafe_b64decode(encoded + padding).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return None
 
 
 def _read_registry_file() -> dict:
@@ -1070,6 +1105,31 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def authenticate_api(request: Request, call_next):
+    if (
+        config.api_token
+        and request.url.path.startswith("/api/")
+        and request.url.path != "/api/auth/status"
+        and request.method != "OPTIONS"
+        and not _is_valid_api_token(_http_api_token(request))
+    ):
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Invalid or missing API token"},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return await call_next(request)
+
+
+@app.get("/api/auth/status")
+async def auth_status(request: Request):
+    return {
+        "required": bool(config.api_token),
+        "authenticated": _is_valid_api_token(_http_api_token(request)),
+    }
+
+
 @app.get("/api/status")
 async def get_status():
     scheduler: TickScheduler = sim_state["scheduler"]
@@ -2017,7 +2077,16 @@ async def pause():
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
+    protocols = websocket.headers.get("sec-websocket-protocol", "")
+    supports_auth_protocol = any(
+        item.strip() == "kami-auth" for item in protocols.split(",")
+    )
+    if not _is_valid_api_token(_websocket_api_token(websocket)):
+        await websocket.close(code=4401, reason="Invalid or missing API token")
+        return
+    await websocket.accept(
+        subprotocol="kami-auth" if supports_auth_protocol else None
+    )
     ws_connections.add(websocket)
     try:
         while True:

@@ -104,6 +104,7 @@ ANTHROPIC_API_KEY=sk-ant-...
 OPENAI_API_KEY=sk-...
 GEMINI_API_KEY=...
 DATABASE_URL=sqlite:///./kami_sim.db
+KAMI_API_TOKEN=
 SIMULATION_BUDGET_USD=0
 
 LLM_PROVIDER=openai
@@ -131,6 +132,10 @@ Back up an existing SQLite database before the first migration. A partially
 initialized legacy schema is rejected instead of being modified implicitly.
 On first startup, records from `simulations_registry.json` are imported into
 the `simulations` table. The JSON file is not used for subsequent runtime writes.
+
+Set `KAMI_API_TOKEN` to require authentication for REST and WebSocket access.
+When it is empty, authentication is disabled for local development. The browser
+keeps an entered operator token in `sessionStorage` only.
 
 Backend API:
 

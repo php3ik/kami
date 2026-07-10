@@ -11,6 +11,7 @@ import AgentActivityBoard from './components/AgentActivityBoard'
 import TimelinePreview from './components/TimelinePreview'
 import LLMSettingsModal from './components/LLMSettingsModal'
 import { GitBranch, Rows3 } from 'lucide-react'
+import { wsClient } from './api/client'
 
 export default function App() {
   const { loadGraph, refreshStatus, selectedAgent, selectedKami, tickLog, isCreateModalOpen, loadAgents, viewMode, setViewMode, loadSimulations } = useSimStore()
@@ -56,10 +57,12 @@ export default function App() {
   }
 
   useEffect(() => {
+    wsClient.connect()
     loadGraph()
     loadAgents()
     loadSimulations()
     refreshStatus()
+    return () => wsClient.disconnect()
   }, [])
 
   useEffect(() => {

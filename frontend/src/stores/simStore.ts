@@ -336,8 +336,7 @@ export const useSimStore = create<SimState>((set, get) => ({
   },
 }))
 
-// Setup WebSocket listeners
-wsClient.connect()
+// Setup WebSocket listeners. App connects after the auth gate succeeds.
 wsClient.onMessage((msg) => {
   const state = useSimStore.getState()
   if (msg.type === 'tick') {

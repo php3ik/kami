@@ -1,33 +1,60 @@
 const API_BASE = '/api'
+const TOKEN_KEY = 'kami_api_token'
+
+export function getApiToken() {
+  return sessionStorage.getItem(TOKEN_KEY) || ''
+}
+
+export function setApiToken(token: string) {
+  const value = token.trim()
+  if (value) sessionStorage.setItem(TOKEN_KEY, value)
+  else sessionStorage.removeItem(TOKEN_KEY)
+}
+
+async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}) {
+  const headers = new Headers(init.headers)
+  const token = getApiToken()
+  if (token) headers.set('Authorization', `Bearer ${token}`)
+  const response = await fetch(input, { ...init, headers })
+  if (response.status === 401) {
+    window.dispatchEvent(new CustomEvent('kami-auth-required'))
+  }
+  return response
+}
+
+export async function fetchAuthStatus() {
+  const res = await apiFetch(`${API_BASE}/auth/status`)
+  return parseResponse(res) as Promise<{ required: boolean; authenticated: boolean }>
+}
 
 export async function fetchStatus() {
-  const res = await fetch(`${API_BASE}/status`)
-  return res.json()
+  const res = await apiFetch(`${API_BASE}/status`)
+  return parseResponse(res)
 }
 
 export async function fetchGraph() {
-  const res = await fetch(`${API_BASE}/graph`)
-  return res.json()
+  const res = await apiFetch(`${API_BASE}/graph`)
+  return parseResponse(res)
 }
 
 export async function fetchKami(kamiId: string) {
-  const res = await fetch(`${API_BASE}/kami/${kamiId}`)
-  return res.json()
+  const res = await apiFetch(`${API_BASE}/kami/${kamiId}`)
+  return parseResponse(res)
 }
 
 export async function fetchAgent(agentId: string) {
-  const res = await fetch(`${API_BASE}/agent/${agentId}`)
-  return res.json()
+  const res = await apiFetch(`${API_BASE}/agent/${agentId}`)
+  return parseResponse(res)
 }
 
 export async function fetchEntity(entityId: string) {
-  const res = await fetch(`${API_BASE}/entity/${encodeURIComponent(entityId)}`)
+  const res = await apiFetch(`${API_BASE}/entity/${encodeURIComponent(entityId)}`)
   return parseResponse(res)
 }
 
 export async function fetchAgents() {
-  const res = await fetch(`${API_BASE}/agents`)
-  return res.json()
+  const res = await apiFetch(`${API_BASE}/agents`)
+  return parseResponse(res)
 }
 
 export async function fetchEvents(params: {
@@ -41,8 +68,8 @@ export async function fetchEvents(params: {
   if (params.until_tick !== undefined) query.set('until_tick', String(params.until_tick))
   if (params.kami_id) query.set('kami_id', params.kami_id)
   if (params.limit) query.set('limit', String(params.limit))
-  const res = await fetch(`${API_BASE}/events?${query}`)
-  return res.json()
+  const res = await apiFetch(`${API_BASE}/events?${query}`)
+  return parseResponse(res)
 }
 
 async function parseResponse(res: Response) {
@@ -66,12 +93,12 @@ async function parseResponse(res: Response) {
 }
 
 export async function fetchSimulations() {
-  const res = await fetch(`${API_BASE}/simulations`)
+  const res = await apiFetch(`${API_BASE}/simulations`)
   return parseResponse(res)
 }
 
 export async function fetchLLMSettings() {
-  const res = await fetch(`${API_BASE}/settings/llm`)
+  const res = await apiFetch(`${API_BASE}/settings/llm`)
   return parseResponse(res)
 }
 
@@ -86,7 +113,7 @@ export async function updateLLMSettings(payload: {
   openai_api_key?: string
   gemini_api_key?: string
 }) {
-  const res = await fetch(`${API_BASE}/settings/llm`, {
+  const res = await apiFetch(`${API_BASE}/settings/llm`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -95,7 +122,7 @@ export async function updateLLMSettings(payload: {
 }
 
 export async function fetchWorldMapStyles() {
-  const res = await fetch(`${API_BASE}/world-map/styles`)
+  const res = await apiFetch(`${API_BASE}/world-map/styles`)
   return parseResponse(res)
 }
 
@@ -107,7 +134,7 @@ export async function generateWorldMap(payload: {
   size?: string
   quality?: string
 }) {
-  const res = await fetch(`${API_BASE}/world-map/generate`, {
+  const res = await apiFetch(`${API_BASE}/world-map/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -116,17 +143,17 @@ export async function generateWorldMap(payload: {
 }
 
 export async function fetchLatestWorldMap() {
-  const res = await fetch(`${API_BASE}/world-map/latest`)
+  const res = await apiFetch(`${API_BASE}/world-map/latest`)
   return parseResponse(res)
 }
 
 export async function switchSimulation(id: string) {
-  const res = await fetch(`${API_BASE}/simulations/${id}/switch`, { method: 'POST' })
+  const res = await apiFetch(`${API_BASE}/simulations/${id}/switch`, { method: 'POST' })
   return parseResponse(res)
 }
 
 export async function deleteSimulation(id: string) {
-  const res = await fetch(`${API_BASE}/simulations/${id}`, { method: 'DELETE' })
+  const res = await apiFetch(`${API_BASE}/simulations/${id}`, { method: 'DELETE' })
   return parseResponse(res)
 }
 
@@ -139,27 +166,27 @@ export async function fetchTimeline(params: {
   query.set('mode', params.mode)
   if (params.since_tick !== undefined) query.set('since_tick', String(params.since_tick))
   if (params.until_tick !== undefined) query.set('until_tick', String(params.until_tick))
-  const res = await fetch(`${API_BASE}/timeline?${query}`)
-  return res.json()
+  const res = await apiFetch(`${API_BASE}/timeline?${query}`)
+  return parseResponse(res)
 }
 
 export async function fetchTimelineSnapshot(kind: 'agent' | 'kami', id: string, tick: number) {
-  const res = await fetch(`${API_BASE}/timeline/snapshot/${kind}/${id}?tick=${tick}`)
-  return res.json()
+  const res = await apiFetch(`${API_BASE}/timeline/snapshot/${kind}/${id}?tick=${tick}`)
+  return parseResponse(res)
 }
 
 export async function stepTick(ticks = 1) {
-  const res = await fetch(`${API_BASE}/sim/step?ticks=${ticks}`, { method: 'POST' })
-  return res.json()
+  const res = await apiFetch(`${API_BASE}/sim/step?ticks=${ticks}`, { method: 'POST' })
+  return parseResponse(res)
 }
 
 export async function startRun(ticks = 100) {
-  const res = await fetch(`${API_BASE}/sim/run?ticks=${ticks}`, { method: 'POST' })
-  return res.json()
+  const res = await apiFetch(`${API_BASE}/sim/run?ticks=${ticks}`, { method: 'POST' })
+  return parseResponse(res)
 }
 
 export async function createSim(prompt: string, count: number, name?: string) {
-  const res = await fetch(`${API_BASE}/sim/create`, {
+  const res = await apiFetch(`${API_BASE}/sim/create`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ prompt, agent_count: count, name })
@@ -168,23 +195,39 @@ export async function createSim(prompt: string, count: number, name?: string) {
 }
 
 export async function pauseSim() {
-  const res = await fetch(`${API_BASE}/sim/pause`, { method: 'POST' })
-  return res.json()
+  const res = await apiFetch(`${API_BASE}/sim/pause`, { method: 'POST' })
+  return parseResponse(res)
 }
 
 export class SimWebSocket {
   private ws: WebSocket | null = null
   private listeners: ((data: any) => void)[] = []
+  private reconnect = false
 
   connect() {
+    if (this.ws?.readyState === WebSocket.OPEN || this.ws?.readyState === WebSocket.CONNECTING) return
+    this.reconnect = true
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    this.ws = new WebSocket(`${protocol}//${window.location.host}/ws`)
-    this.ws.onmessage = (event) => {
+    const token = getApiToken()
+    const authProtocol = token ? `token.${encodeToken(token)}` : null
+    const socket = new WebSocket(
+      `${protocol}//${window.location.host}/ws`,
+      authProtocol ? ['kami-auth', authProtocol] : undefined,
+    )
+    this.ws = socket
+    socket.onmessage = (event) => {
       const data = JSON.parse(event.data)
       this.listeners.forEach((fn) => fn(data))
     }
-    this.ws.onclose = () => {
-      setTimeout(() => this.connect(), 2000)
+    socket.onclose = (event) => {
+      if (this.ws !== socket) return
+      this.ws = null
+      if (event.code === 4401) {
+        this.reconnect = false
+        window.dispatchEvent(new CustomEvent('kami-auth-required'))
+      } else if (this.reconnect) {
+        setTimeout(() => this.connect(), 2000)
+      }
     }
   }
 
@@ -200,8 +243,17 @@ export class SimWebSocket {
   }
 
   disconnect() {
+    this.reconnect = false
     this.ws?.close()
+    this.ws = null
   }
+}
+
+function encodeToken(token: string) {
+  const bytes = new TextEncoder().encode(token)
+  let binary = ''
+  bytes.forEach((byte) => { binary += String.fromCharCode(byte) })
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 }
 
 export const wsClient = new SimWebSocket()
