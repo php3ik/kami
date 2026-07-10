@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from dataclasses import dataclass, field
 
 from sqlalchemy.orm import Session
 
@@ -12,6 +13,15 @@ from ..factstore import tools as fs
 from ..spatial.graph import SpatialGraph
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class StagedProposals:
+    """Database changes staged in the caller's open tick transaction."""
+
+    events: list[dict] = field(default_factory=list)
+    failed_mutations: list[dict] = field(default_factory=list)
+    accepted: list[tuple[dict, str | None]] = field(default_factory=list)
 
 
 def compute_initiative(agent_id: str, tick: int, fatigue: float = 0.0) -> float:
@@ -28,10 +38,25 @@ def commit_proposals(
     event_bus: EventBus,
     spatial_graph: SpatialGraph,
 ) -> tuple[list[dict], list[dict]]:
-    """Commit accepted scenes and return events plus rejected mutations."""
-    committed_events: list[dict] = []
-    failed_mutations: list[dict] = []
-    accepted_proposals: list[tuple[dict, str | None]] = []
+    """Compatibility wrapper for callers that own no outer tick transaction."""
+    staged = stage_proposals(session, tick, proposals, spatial_graph)
+    session.commit()
+    try:
+        publish_staged_broadcasts(staged, tick, event_bus, spatial_graph)
+    except Exception:
+        logger.exception("Post-commit broadcast publication failed for tick %s", tick)
+    return staged.events, staged.failed_mutations
+
+
+def stage_proposals(
+    session: Session,
+    tick: int,
+    proposals: list[dict],
+    spatial_graph: SpatialGraph,
+) -> StagedProposals:
+    """Apply accepted scenes without committing or publishing side effects."""
+    _ensure_physical_transaction(session)
+    staged = StagedProposals()
 
     for proposal in sorted(proposals, key=lambda item: item.get("kami_id") or ""):
         kami_id = proposal.get("kami_id")
@@ -44,7 +69,7 @@ def commit_proposals(
                     try:
                         _apply_mutation(session, tick, mutation, spatial_graph)
                     except Exception as exc:
-                        failed_mutations.append({
+                        staged.failed_mutations.append({
                             "mutation": mutation,
                             "error": str(exc),
                             "kami_id": kami_id,
@@ -82,21 +107,42 @@ def commit_proposals(
                     )
         except Exception as exc:
             logger.warning("Proposal rejected in %s: %s", kami_id, exc)
-            if not failed_mutations or failed_mutations[-1].get("kami_id") != kami_id:
-                failed_mutations.append({
+            if (
+                not staged.failed_mutations
+                or staged.failed_mutations[-1].get("kami_id") != kami_id
+            ):
+                staged.failed_mutations.append({
                     "mutation": None,
                     "error": str(exc),
                     "kami_id": kami_id,
                 })
             continue
 
-        committed_events.extend(proposal_events)
-        accepted_proposals.append((proposal, kami_id))
+        staged.events.extend(proposal_events)
+        staged.accepted.append((proposal, kami_id))
 
-    session.commit()
-    for proposal, kami_id in accepted_proposals:
+    return staged
+
+
+def _ensure_physical_transaction(session: Session) -> None:
+    """Make SQLite savepoints participate in the caller's outer transaction."""
+    connection = session.connection()
+    if connection.dialect.name != "sqlite":
+        return
+    driver_connection = connection.connection.driver_connection
+    if not driver_connection.in_transaction:
+        connection.exec_driver_sql("BEGIN")
+
+
+def publish_staged_broadcasts(
+    staged: StagedProposals,
+    tick: int,
+    event_bus: EventBus,
+    spatial_graph: SpatialGraph,
+) -> None:
+    """Publish ephemeral broadcasts only after the database commit succeeds."""
+    for proposal, kami_id in staged.accepted:
         _publish_broadcasts(proposal, kami_id, tick, event_bus, spatial_graph)
-    return committed_events, failed_mutations
 
 
 def _publish_broadcasts(

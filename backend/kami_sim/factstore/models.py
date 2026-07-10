@@ -92,6 +92,30 @@ class LLMCall(Base):
     )
 
 
+class SimulationTick(Base):
+    """Durable idempotency and recovery record for one simulation tick."""
+
+    __tablename__ = "simulation_ticks"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    simulation_id = Column(String, nullable=False)
+    tick = Column(Integer, nullable=False)
+    status = Column(String, nullable=False, default="committed")
+    attempt_count = Column(Integer, nullable=False, default=1)
+    result = Column(JSON, nullable=False, default=dict)
+    error_message = Column(Text, nullable=True)
+    started_at = Column(DateTime, nullable=False, default=_utcnow_naive)
+    completed_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "simulation_id", "tick", name="uq_simulation_ticks_sim_tick"
+        ),
+        Index("ix_simulation_ticks_sim_status", "simulation_id", "status"),
+        Index("ix_simulation_ticks_sim_completed", "simulation_id", "completed_at"),
+    )
+
+
 class Entity(Base):
     """Registry of everything that exists in the simulation."""
 

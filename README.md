@@ -8,6 +8,7 @@ The core idea is to separate subjective cognition from objective reality. Agents
 
 - Dynamic world creation from a natural-language prompt, including characters, Kamis, objects, relationships, biographies, and local history.
 - Multiple saved simulation worlds with switching, deletion, population/count/cost summaries, and isolated world data inside the shared database.
+- Atomic tick commits with durable idempotency records, failed-attempt recovery, and restart-safe clock restoration.
 - Multi-provider LLM routing for Anthropic, OpenAI, and Gemini, with cheap/strong model tiers.
 - In-app settings panel for LLM provider, model names, API tokens, and image-generation model settings.
 - Tick-based simulation with agent cognition, Kami scene resolution, state mutation, event logging, and WebSocket updates.
@@ -132,6 +133,8 @@ Back up an existing SQLite database before the first migration. A partially
 initialized legacy schema is rejected instead of being modified implicitly.
 On first startup, records from `simulations_registry.json` are imported into
 the `simulations` table. The JSON file is not used for subsequent runtime writes.
+Committed ticks are recorded in `simulation_ticks`; state mutations, canonical
+events, the tick result, and the next clock value are committed together.
 
 Set `KAMI_API_TOKEN` to require authentication for REST and WebSocket access.
 When it is empty, authentication is disabled for local development. The browser

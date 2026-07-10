@@ -7,9 +7,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import json
 import time
-from typing import Any
+from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
 
@@ -17,13 +16,13 @@ from ..agent_worker.worker import AgentCognitionWorker
 from ..config import config
 from ..eventbus.bus import EventBus
 from ..factstore import tools as fs
-from ..factstore.models import init_db
+from ..factstore.models import Simulation, SimulationTick
 from ..kami_worker.worker import KamiWorker
 from ..llm.budget import budget
 from ..spatial.graph import SpatialGraph
 from .activity_detector import detect_active_agents, detect_active_kami
 from .conflict_resolver import order_intents_by_initiative
-from .write_committer import commit_proposals
+from .write_committer import publish_staged_broadcasts, stage_proposals
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +78,7 @@ class TickScheduler:
                         f"{tick_result['wall_time_ms']}ms"
                     )
             except Exception as e:
+                session.rollback()
                 logger.error(f"Tick {tick} failed: {e}", exc_info=True)
                 tick_result = {
                     "tick": tick,
@@ -93,6 +93,7 @@ class TickScheduler:
                     "narratives": {},
                     "failed_mutations": [],
                 }
+                self._record_tick_failure(tick, tick_result)
                 self.tick_log.append(tick_result)
                 run_results.append(tick_result)
             finally:
@@ -110,6 +111,10 @@ class TickScheduler:
 
     async def _run_tick(self, session: Session, tick: int, progress_callback=None) -> dict:
         """Execute one complete BSP tick."""
+        replay = self._committed_tick_result(session, tick)
+        if replay is not None:
+            return {**replay, "idempotent_replay": True}
+
         all_kami = self.spatial_graph.all_kami_ids()
 
         # === READ PHASE ===
@@ -121,7 +126,7 @@ class TickScheduler:
         total_agents = sum(len(agents) for agents in agents_by_kami.values())
 
         if not active_kami:
-            return {
+            result = {
                 "tick": tick,
                 "active_kami_count": 0,
                 "active_agent_count": 0,
@@ -129,6 +134,8 @@ class TickScheduler:
                 "narratives": {},
                 "failed_mutations": [],
             }
+            self._commit_tick(session, tick, result)
+            return result
 
         # === COMPUTE PHASE 1: Agent cognition (parallel) ===
         agent_worker = AgentCognitionWorker(session, spatial_graph=self.spatial_graph)
@@ -238,48 +245,149 @@ class TickScheduler:
         proposals = await asyncio.gather(*kami_coros)
 
         # === WRITE PHASE ===
-        committed_events, failed_mutations = commit_proposals(
-            session, tick, proposals, self.event_bus, self.spatial_graph,
+        staged = stage_proposals(
+            session, tick, proposals, self.spatial_graph,
         )
-
-        # === PROPAGATE PHASE ===
-        # Events are already propagated via EventBus in commit_proposals
-        # Additional propagation for high-salience events
-        for event in committed_events:
-            if event["salience"] >= config.kami_wake_salience_threshold:
-                kami_id = event.get("kami_id")
-                if kami_id:
-                    neighbors = self.spatial_graph.get_neighbors(kami_id)
-                    for neighbor in neighbors:
-                        edge = self.spatial_graph.get_edge_data(kami_id, neighbor)
-                        att = edge.get("audio_attenuation", 0.2) if edge else 0.2
-                        effective_salience = event["salience"] * (1.0 - att)
-                        if effective_salience > config.kami_wake_salience_threshold:
-                            self.event_bus.propagate_event(
-                                source_event_id=event["event_id"],
-                                source_kami_id=kami_id,
-                                target_kami_id=neighbor,
-                                event_type=event["event_type"],
-                                narrative_digest=event["narrative"][:100],
-                                salience=effective_salience,
-                                current_tick=tick,
-                            )
 
         # Build tick result
         narratives = {}
         for p in proposals:
             narratives[p["kami_id"]] = p.get("narrative", "")
 
-        return {
+        result = {
             "tick": tick,
             "active_kami_count": len(active_kami),
             "active_agent_count": total_agents,
             "active_kami": list(active_kami),
-            "events": committed_events,
-            "failed_mutations": failed_mutations,
+            "events": staged.events,
+            "failed_mutations": staged.failed_mutations,
             "narratives": narratives,
             "monologues": all_monologues,
         }
+        self._commit_tick(session, tick, result)
+
+        # === PROPAGATE PHASE ===
+        # These notifications are ephemeral. Canonical state is already durable,
+        # so a listener failure must not cause the same tick to execute twice.
+        try:
+            publish_staged_broadcasts(
+                staged, tick, self.event_bus, self.spatial_graph
+            )
+        except Exception:
+            logger.exception("Post-commit broadcasts failed for tick %s", tick)
+        try:
+            self._propagate_committed_events(staged.events, tick)
+        except Exception:
+            logger.exception("Post-commit event propagation failed for tick %s", tick)
+        return result
+
+    def _simulation_scope(self) -> str:
+        return self.simulation_id or "default"
+
+    def _committed_tick_result(self, session: Session, tick: int) -> dict | None:
+        record = (
+            session.query(SimulationTick)
+            .filter(
+                SimulationTick.simulation_id == self._simulation_scope(),
+                SimulationTick.tick == tick,
+                SimulationTick.status == "committed",
+            )
+            .one_or_none()
+        )
+        return dict(record.result or {}) if record is not None else None
+
+    def _commit_tick(self, session: Session, tick: int, result: dict) -> None:
+        scope = self._simulation_scope()
+        now = datetime.now(UTC).replace(tzinfo=None)
+        record = (
+            session.query(SimulationTick)
+            .filter(
+                SimulationTick.simulation_id == scope,
+                SimulationTick.tick == tick,
+            )
+            .one_or_none()
+        )
+        if record is None:
+            record = SimulationTick(
+                simulation_id=scope,
+                tick=tick,
+                attempt_count=1,
+                started_at=now,
+            )
+            session.add(record)
+        else:
+            record.attempt_count = int(record.attempt_count or 0) + 1
+            record.started_at = now
+        record.status = "committed"
+        record.result = result
+        record.error_message = None
+        record.completed_at = now
+
+        simulation = session.get(Simulation, scope)
+        if simulation is not None:
+            simulation.current_tick = max(
+                int(simulation.current_tick or 0), tick + 1
+            )
+            simulation.updated_at = now
+        session.commit()
+
+    def _record_tick_failure(self, tick: int, result: dict) -> None:
+        session = self.session_factory()
+        try:
+            scope = self._simulation_scope()
+            now = datetime.now(UTC).replace(tzinfo=None)
+            record = (
+                session.query(SimulationTick)
+                .filter(
+                    SimulationTick.simulation_id == scope,
+                    SimulationTick.tick == tick,
+                )
+                .one_or_none()
+            )
+            if record is not None and record.status == "committed":
+                return
+            if record is None:
+                record = SimulationTick(
+                    simulation_id=scope,
+                    tick=tick,
+                    attempt_count=1,
+                    started_at=now,
+                )
+                session.add(record)
+            else:
+                record.attempt_count = int(record.attempt_count or 0) + 1
+            record.status = "failed"
+            record.result = result
+            record.error_message = str(result.get("error", ""))[:2000]
+            record.completed_at = now
+            session.commit()
+        except Exception:
+            session.rollback()
+            logger.exception("Could not persist failure record for tick %s", tick)
+        finally:
+            session.close()
+
+    def _propagate_committed_events(self, events: list[dict], tick: int) -> None:
+        for event in events:
+            if event["salience"] < config.kami_wake_salience_threshold:
+                continue
+            kami_id = event.get("kami_id")
+            if not kami_id:
+                continue
+            for neighbor in self.spatial_graph.get_neighbors(kami_id):
+                edge = self.spatial_graph.get_edge_data(kami_id, neighbor)
+                attenuation = edge.get("audio_attenuation", 0.2) if edge else 0.2
+                effective_salience = event["salience"] * (1.0 - attenuation)
+                if effective_salience > config.kami_wake_salience_threshold:
+                    self.event_bus.propagate_event(
+                        source_event_id=event["event_id"],
+                        source_kami_id=kami_id,
+                        target_kami_id=neighbor,
+                        event_type=event["event_type"],
+                        narrative_digest=event["narrative"][:100],
+                        salience=effective_salience,
+                        current_tick=tick,
+                    )
 
     def _resolve_intent_target(
         self,

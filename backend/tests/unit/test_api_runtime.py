@@ -3,6 +3,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from kami_sim.api import server
+from kami_sim.factstore.models import Event, SimulationTick, init_db
 from kami_sim.simulations import RunConflictError
 
 
@@ -40,3 +41,35 @@ def test_openapi_exposes_bounded_tick_parameters():
 def test_default_cors_configuration_is_not_wildcard():
     assert server.config.cors_origins
     assert "*" not in server.config.cors_origins
+
+
+def test_next_tick_prefers_committed_tick_ledger_over_legacy_events():
+    engine, factory = init_db("sqlite:///:memory:")
+    try:
+        with factory() as session:
+            session.add(
+                Event(
+                    event_id="evt_old",
+                    simulation_id="sim-a",
+                    tick=2,
+                    event_type="idle",
+                    participants=[],
+                    payload={},
+                    salience=0.1,
+                    narrative="",
+                    causes=[],
+                )
+            )
+            session.add(
+                SimulationTick(
+                    simulation_id="sim-a",
+                    tick=5,
+                    status="committed",
+                    result={"tick": 5},
+                )
+            )
+            session.commit()
+
+            assert server._next_tick_from_db(session, "sim-a") == 6
+    finally:
+        engine.dispose()

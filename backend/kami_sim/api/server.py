@@ -43,6 +43,7 @@ from ..factstore.models import (
     ReadReceipt,
     Relation,
     Schedule,
+    SimulationTick,
     init_db,
 )
 from ..llm.budget import BudgetExceededError, budget
@@ -1011,7 +1012,13 @@ def _update_active_runtime(
 
 
 def _next_tick_from_db(session, simulation_id: str = "default") -> int:
-    """Resume after the highest committed event tick in the current database."""
+    """Resume after the durable tick ledger, with events as legacy fallback."""
+    committed_tick = session.query(func.max(SimulationTick.tick)).filter(
+        SimulationTick.simulation_id == simulation_id,
+        SimulationTick.status == "committed",
+    ).scalar()
+    if committed_tick is not None:
+        return committed_tick + 1
     max_tick = session.query(func.max(Event.tick)).filter(
         Event.simulation_id == simulation_id
     ).scalar()
@@ -1019,6 +1026,12 @@ def _next_tick_from_db(session, simulation_id: str = "default") -> int:
 
 
 def _next_tick_for_record(session, record: dict) -> int:
+    committed_tick = session.query(func.max(SimulationTick.tick)).filter(
+        SimulationTick.simulation_id == record["id"],
+        SimulationTick.status == "committed",
+    ).scalar()
+    if committed_tick is not None:
+        return committed_tick + 1
     kami_ids = _record_kami_ids(record)
     if not kami_ids:
         return _next_tick_from_db(session, record["id"])
@@ -1279,6 +1292,7 @@ async def delete_simulation(simulation_id: str):
     session = sim_state["session_factory"]()
     try:
         scoped_models = (
+            SimulationTick,
             LLMCall,
             ReadReceipt,
             Message,
