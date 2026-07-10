@@ -5,7 +5,7 @@ All tables use temporal versioning via valid_until_tick IS NULL for current rows
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import (
     JSON,
@@ -214,7 +214,10 @@ class AgentIntentRecord(Base):
     result_summary = Column(Text, default="")
     blockers = Column(JSON, default=list)
     pressure = Column(JSON, default=dict)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(
+        DateTime,
+        default=lambda: datetime.now(UTC).replace(tzinfo=None),
+    )
 
     __table_args__ = (
         Index("ix_agent_intents_agent_tick", "agent_id", "tick"),

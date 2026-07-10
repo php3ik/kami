@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
+
 from sqlalchemy.orm import Session
 
 from ..config import config
@@ -18,6 +20,7 @@ def detect_active_kami(
 ) -> set[str]:
     """Determine which kami need rendering this tick."""
     active = set()
+    due_kami_ids = {schedule.kami_id for schedule in fs.get_due_schedules(session, tick)}
 
     for kami_id in all_kami_ids:
         # (a) Kami with at least one agent inside
@@ -27,8 +30,7 @@ def detect_active_kami(
             continue
 
         # (b) Kami with a scheduled event firing this tick
-        schedules = fs.get_due_schedules(session, tick)
-        if any(s.kami_id == kami_id for s in schedules):
+        if kami_id in due_kami_ids:
             active.add(kami_id)
             continue
 
@@ -47,14 +49,14 @@ def detect_active_kami(
 
 def detect_active_agents(
     session: Session,
-    active_kami: set[str],
+    active_kami: Collection[str],
 ) -> dict[str, list[str]]:
     """Get agents per active kami. Returns {kami_id: [agent_ids]}."""
     result = {}
-    for kami_id in active_kami:
+    for kami_id in sorted(active_kami):
         agents = fs.get_agents_in_kami(session, kami_id)
         if agents:
-            result[kami_id] = [a.entity_id for a in agents]
+            result[kami_id] = sorted(a.entity_id for a in agents)
         else:
             result[kami_id] = []
     return result

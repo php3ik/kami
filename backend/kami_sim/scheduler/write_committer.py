@@ -1,13 +1,9 @@
-"""WriteCommitter — single-threaded mutation applier (spec §2.5).
-
-Consumes propose-lists and applies them in deterministic order.
-"""
+"""Apply scene proposals to FactStore in a deterministic order."""
 
 from __future__ import annotations
 
 import hashlib
 import logging
-from typing import Any
 
 from sqlalchemy.orm import Session
 
@@ -19,14 +15,9 @@ logger = logging.getLogger(__name__)
 
 
 def compute_initiative(agent_id: str, tick: int, fatigue: float = 0.0) -> float:
-    """Compute initiative for action ordering.
-
-    Function of reaction speed * (1 - fatigue) * surprise.
-    Hash-based tiebreak for determinism.
-    """
-    # Deterministic hash for tiebreaking
-    h = hashlib.sha256(f"{agent_id}:{tick}".encode()).hexdigest()
-    hash_factor = int(h[:8], 16) / 0xFFFFFFFF
+    """Compute a deterministic initiative score for action ordering."""
+    digest = hashlib.sha256(f"{agent_id}:{tick}".encode()).hexdigest()
+    hash_factor = int(digest[:8], 16) / 0xFFFFFFFF
     return (1.0 - fatigue) * hash_factor
 
 
@@ -36,110 +27,135 @@ def commit_proposals(
     proposals: list[dict],
     event_bus: EventBus,
     spatial_graph: SpatialGraph,
-) -> list[dict]:
-    """Apply all proposals from all kami in deterministic order.
+) -> tuple[list[dict], list[dict]]:
+    """Commit accepted scenes and return events plus rejected mutations."""
+    committed_events: list[dict] = []
+    failed_mutations: list[dict] = []
+    accepted_proposals: list[tuple[dict, str | None]] = []
 
-    Returns list of committed events.
-    """
-    committed_events = []
-    failed_mutations = []
-
-    for proposal in proposals:
+    for proposal in sorted(proposals, key=lambda item: item.get("kami_id") or ""):
         kami_id = proposal.get("kami_id")
+        proposal_events: list[dict] = []
 
-        # Apply mutations
-        for mutation in proposal.get("mutations", []):
-            try:
-                _apply_mutation(session, tick, mutation, spatial_graph)
-            except Exception as e:
-                logger.warning(f"Mutation failed in {kami_id}: {mutation['type']} — {e}")
+        try:
+            # A scene is atomic: reject its narrative if any mutation fails.
+            with session.begin_nested():
+                for mutation in proposal.get("mutations", []):
+                    try:
+                        _apply_mutation(session, tick, mutation, spatial_graph)
+                    except Exception as exc:
+                        failed_mutations.append({
+                            "mutation": mutation,
+                            "error": str(exc),
+                            "kami_id": kami_id,
+                        })
+                        raise
+
+                for event_data in proposal.get("events", []):
+                    event = fs.emit_event(
+                        session,
+                        tick=tick,
+                        kami_id=event_data.get("kami_id") or kami_id,
+                        event_type=event_data["event_type"],
+                        participants=event_data.get("participants", []),
+                        payload=event_data.get("payload", {}),
+                        salience=event_data.get("salience", 0.3),
+                        narrative=event_data.get("narrative", ""),
+                        causes=event_data.get("causes", []),
+                    )
+                    proposal_events.append({
+                        "event_id": event.event_id,
+                        "kami_id": event.kami_id,
+                        "event_type": event.event_type,
+                        "narrative": event.narrative,
+                        "salience": event.salience,
+                        "participants": event.participants,
+                        "payload": event.payload,
+                        "causes": event.causes,
+                    })
+                    fs.settle_tick_intents(
+                        session,
+                        tick=tick,
+                        event_id=event.event_id,
+                        participants=event.participants or [],
+                        narrative=event.narrative or "",
+                    )
+        except Exception as exc:
+            logger.warning("Proposal rejected in %s: %s", kami_id, exc)
+            if not failed_mutations or failed_mutations[-1].get("kami_id") != kami_id:
                 failed_mutations.append({
-                    "mutation": mutation,
-                    "error": str(e),
+                    "mutation": None,
+                    "error": str(exc),
                     "kami_id": kami_id,
                 })
+            continue
 
-        # Commit events
-        for event_data in proposal.get("events", []):
-            try:
-                event = fs.emit_event(
-                    session,
-                    tick=tick,
-                    kami_id=event_data.get("kami_id"),
-                    event_type=event_data["event_type"],
-                    participants=event_data.get("participants", []),
-                    payload=event_data.get("payload", {}),
-                    salience=event_data.get("salience", 0.3),
-                    narrative=event_data.get("narrative", ""),
-                )
-                committed_events.append({
-                    "event_id": event.event_id,
-                    "kami_id": event.kami_id,
-                    "event_type": event.event_type,
-                    "narrative": event.narrative,
-                    "salience": event.salience,
-                    "participants": event.participants,
-                    "payload": event.payload,
-                })
-                fs.settle_tick_intents(
-                    session,
-                    tick=tick,
-                    event_id=event.event_id,
-                    participants=event.participants or [],
-                    narrative=event.narrative or "",
-                )
-            except Exception as e:
-                logger.error(f"Event emit failed: {e}")
-
-        # Propagate broadcasts to neighbors
-        for broadcast in proposal.get("broadcasts", []):
-            if kami_id:
-                neighbors = spatial_graph.get_neighbors(kami_id)
-                attenuation_map = {}
-                for n in neighbors:
-                    edge = spatial_graph.get_edge_data(kami_id, n)
-                    if edge:
-                        attenuation_map[n] = edge.get("audio_attenuation", 0.2)
-                event_bus.publish_broadcast(
-                    source_kami_id=kami_id,
-                    text=broadcast["text"],
-                    salience=broadcast.get("salience", 0.3),
-                    current_tick=tick,
-                    neighbor_kami_ids=neighbors,
-                    attenuation_map=attenuation_map,
-                )
+        committed_events.extend(proposal_events)
+        accepted_proposals.append((proposal, kami_id))
 
     session.commit()
-    return committed_events
+    for proposal, kami_id in accepted_proposals:
+        _publish_broadcasts(proposal, kami_id, tick, event_bus, spatial_graph)
+    return committed_events, failed_mutations
 
 
-def _resolve_kami_id(session: Session, kami_id_raw: str, spatial_graph: SpatialGraph) -> str:
-    """Try to resolve a possibly-hallucinated kami ID to a real one."""
-    # Exact match
+def _publish_broadcasts(
+    proposal: dict,
+    kami_id: str | None,
+    tick: int,
+    event_bus: EventBus,
+    spatial_graph: SpatialGraph,
+) -> None:
+    if not kami_id:
+        return
+
+    for broadcast in proposal.get("broadcasts", []):
+        neighbors = spatial_graph.get_neighbors(kami_id)
+        attenuation_map = {}
+        for neighbor_id in neighbors:
+            edge = spatial_graph.get_edge_data(kami_id, neighbor_id)
+            if edge:
+                attenuation_map[neighbor_id] = edge.get("audio_attenuation", 0.2)
+        event_bus.publish_broadcast(
+            source_kami_id=kami_id,
+            text=broadcast["text"],
+            salience=broadcast.get("salience", 0.3),
+            current_tick=tick,
+            neighbor_kami_ids=neighbors,
+            attenuation_map=attenuation_map,
+        )
+
+
+def _resolve_kami_id(
+    session: Session, kami_id_raw: str, spatial_graph: SpatialGraph
+) -> str:
+    """Try to resolve a possibly hallucinated Kami ID to a real one."""
     if session.get(fs.Entity, kami_id_raw):
         return kami_id_raw
-    # Try common hallucination patterns: spaces, missing prefix, wrong separators
+
     all_kami = spatial_graph.all_kami_ids()
     raw_lower = kami_id_raw.lower().replace(" ", "_").replace("-", "_")
-    # Add kami_ prefix if missing
     candidates = [raw_lower, f"kami_{raw_lower}"]
     for candidate in candidates:
         for real_id in all_kami:
             if candidate == real_id.lower():
                 return real_id
-    # Substring match: if the hallucinated ID is contained in a real one or vice versa
     for real_id in all_kami:
         if raw_lower in real_id.lower() or real_id.lower() in raw_lower:
             return real_id
-    # No match found
     return kami_id_raw
 
 
-def _apply_mutation(session: Session, tick: int, mutation: dict, spatial_graph: SpatialGraph | None = None):
-    """Apply a single mutation to FactStore."""
-    mtype = mutation["type"]
+def _apply_mutation(
+    session: Session,
+    tick: int,
+    mutation: dict,
+    spatial_graph: SpatialGraph | None = None,
+) -> None:
+    """Apply one validated mutation to FactStore."""
+    mutation_type = mutation["type"]
 
-    if mtype == "move_entity":
+    if mutation_type == "move_entity":
         to_kami = mutation["to_kami_id"]
         if spatial_graph:
             to_kami = _resolve_kami_id(session, to_kami, spatial_graph)
@@ -149,7 +165,7 @@ def _apply_mutation(session: Session, tick: int, mutation: dict, spatial_graph: 
             to_kami_id=to_kami,
             tick=tick,
         )
-    elif mtype == "change_state":
+    elif mutation_type == "change_state":
         fs.change_state(
             session,
             entity_id=mutation["entity_id"],
@@ -157,7 +173,7 @@ def _apply_mutation(session: Session, tick: int, mutation: dict, spatial_graph: 
             new_value=mutation["new_value"],
             tick=tick,
         )
-    elif mtype == "update_relation":
+    elif mutation_type == "update_relation":
         weight = mutation.get("weight")
         if weight and not isinstance(weight, dict):
             weight = {"value": weight}
@@ -169,7 +185,7 @@ def _apply_mutation(session: Session, tick: int, mutation: dict, spatial_graph: 
             tick=tick,
             weight=weight,
         )
-    elif mtype == "create_entity":
+    elif mutation_type == "create_entity":
         entity = fs.create_entity(
             session,
             kind=mutation["kind"],
@@ -178,17 +194,16 @@ def _apply_mutation(session: Session, tick: int, mutation: dict, spatial_graph: 
             archetype=mutation.get("archetype"),
             kami_id=mutation.get("kami_id"),
         )
-        # Place it in the kami
         if mutation.get("kami_id"):
             fs.place_entity(session, entity.entity_id, mutation["kami_id"], tick)
-    elif mtype == "transfer_ownership":
+    elif mutation_type == "transfer_ownership":
         fs.transfer_ownership(
             session,
             entity_id=mutation["entity_id"],
             new_owner_id=mutation["new_owner_id"],
             tick=tick,
         )
-    elif mtype == "record_intent_result":
+    elif mutation_type == "record_intent_result":
         fs.mark_intent_result(
             session,
             intent_id=mutation["intent_id"],
@@ -196,7 +211,7 @@ def _apply_mutation(session: Session, tick: int, mutation: dict, spatial_graph: 
             result_summary=mutation.get("summary", ""),
             blockers=mutation.get("blockers", []),
         )
-    elif mtype == "update_conversation_thread":
+    elif mutation_type == "update_conversation_thread":
         fs.upsert_conversation_thread(
             session,
             tick=tick,
@@ -211,13 +226,12 @@ def _apply_mutation(session: Session, tick: int, mutation: dict, spatial_graph: 
             thread_id=mutation.get("thread_id"),
             last_event_id=mutation.get("last_event_id"),
         )
-    elif mtype == "adjust_need":
+    elif mutation_type == "adjust_need":
         current = fs.get_agent_needs(session, mutation["agent_id"])
         need = mutation["need"]
-        if "value" in mutation:
-            value = mutation["value"]
-        else:
+        value = mutation.get("value")
+        if value is None:
             value = current.get(need, 0.0) + mutation.get("delta", 0.0)
         fs.set_agent_need(session, mutation["agent_id"], need, value, tick)
     else:
-        logger.warning(f"Unknown mutation type: {mtype}")
+        raise ValueError(f"Unknown mutation type: {mutation_type}")

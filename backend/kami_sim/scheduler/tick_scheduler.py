@@ -36,10 +36,12 @@ class TickScheduler:
         session_factory,
         spatial_graph: SpatialGraph,
         event_bus: EventBus | None = None,
+        simulation_id: str | None = None,
     ):
         self.session_factory = session_factory
         self.spatial_graph = spatial_graph
         self.event_bus = event_bus or EventBus()
+        self.simulation_id = simulation_id
         self.current_tick = 0
         self.tick_log: list[dict] = []
 
@@ -53,14 +55,21 @@ class TickScheduler:
         for i in range(num_ticks):
             tick = self.current_tick
             tick_start = time.time()
+            tick_cost_before = budget.get_tick_cost(tick, self.simulation_id)
+            tick_succeeded = False
 
             session = self.session_factory()
             try:
-                tick_result = await self._run_tick(session, tick, progress_callback)
+                with budget.scope(self.simulation_id):
+                    tick_result = await self._run_tick(session, tick, progress_callback)
                 tick_result["wall_time_ms"] = int((time.time() - tick_start) * 1000)
-                tick_result["tick_cost_usd"] = round(budget.get_tick_cost(tick), 6)
+                tick_result["tick_cost_usd"] = round(
+                    budget.get_tick_cost(tick, self.simulation_id) - tick_cost_before,
+                    6,
+                )
                 self.tick_log.append(tick_result)
                 run_results.append(tick_result)
+                tick_succeeded = True
 
                 if (i + 1) % 10 == 0 or i == 0:
                     logger.info(
@@ -76,11 +85,21 @@ class TickScheduler:
                     "error": str(e),
                     "active_kami_count": 0,
                     "active_agent_count": 0,
+                    "tick_cost_usd": round(
+                        budget.get_tick_cost(tick, self.simulation_id) - tick_cost_before,
+                        6,
+                    ),
+                    "events": [],
+                    "narratives": {},
+                    "failed_mutations": [],
                 }
                 self.tick_log.append(tick_result)
                 run_results.append(tick_result)
             finally:
                 session.close()
+
+            if not tick_succeeded:
+                break
 
             self.current_tick += 1
 
@@ -94,7 +113,9 @@ class TickScheduler:
         all_kami = self.spatial_graph.all_kami_ids()
 
         # === READ PHASE ===
-        active_kami = detect_active_kami(session, self.event_bus, tick, all_kami)
+        active_kami = sorted(
+            detect_active_kami(session, self.event_bus, tick, all_kami)
+        )
         agents_by_kami = detect_active_agents(session, active_kami)
 
         total_agents = sum(len(agents) for agents in agents_by_kami.values())
@@ -106,6 +127,7 @@ class TickScheduler:
                 "active_agent_count": 0,
                 "events": [],
                 "narratives": {},
+                "failed_mutations": [],
             }
 
         # === COMPUTE PHASE 1: Agent cognition (parallel) ===
@@ -216,7 +238,7 @@ class TickScheduler:
         proposals = await asyncio.gather(*kami_coros)
 
         # === WRITE PHASE ===
-        committed_events = commit_proposals(
+        committed_events, failed_mutations = commit_proposals(
             session, tick, proposals, self.event_bus, self.spatial_graph,
         )
 
@@ -254,6 +276,7 @@ class TickScheduler:
             "active_agent_count": total_agents,
             "active_kami": list(active_kami),
             "events": committed_events,
+            "failed_mutations": failed_mutations,
             "narratives": narratives,
             "monologues": all_monologues,
         }

@@ -15,6 +15,14 @@ VALID_LLM_PROVIDERS = {"anthropic", "openai", "gemini"}
 VALID_IMAGE_PROVIDERS = {"openai", "gemini"}
 
 
+def _csv_env(name: str, default: str) -> tuple[str, ...]:
+    return tuple(
+        item.strip()
+        for item in os.getenv(name, default).split(",")
+        if item.strip()
+    )
+
+
 @dataclass
 class SimConfig:
     # Time
@@ -48,6 +56,14 @@ class SimConfig:
 
     # Database
     database_url: str = os.getenv("DATABASE_URL", "sqlite:///./kami_sim.db")
+
+    # HTTP
+    cors_origins: tuple[str, ...] = field(
+        default_factory=lambda: _csv_env(
+            "CORS_ORIGINS",
+            "http://localhost:5173,http://127.0.0.1:5173",
+        )
+    )
 
     # API keys
     anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")

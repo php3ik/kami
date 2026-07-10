@@ -85,6 +85,11 @@ KAMI_TOOLS = [
                 "narrative": {"type": "string", "description": "2-4 sentence description of what happened"},
                 "salience": {"type": "number", "minimum": 0.0, "maximum": 1.0},
                 "payload": {"type": "object"},
+                "causes": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "IDs of earlier events that directly caused this event",
+                },
             },
             "required": ["event_type", "narrative", "salience"],
         },
