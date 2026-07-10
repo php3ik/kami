@@ -264,7 +264,9 @@ class LLMClient:
             "max_completion_tokens": max_tokens,
         }
         if self._openai_uses_reasoning_controls(model):
-            kwargs["reasoning_effort"] = "none" if component == "WorldBuilder" else "low"
+            kwargs["reasoning_effort"] = (
+                "none" if tools or component == "WorldBuilder" else "low"
+            )
         if not self._openai_uses_default_temperature(model):
             kwargs["temperature"] = temperature
         if tools:

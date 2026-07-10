@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 
 from kami_sim.config import config
@@ -65,6 +67,48 @@ def test_anthropic_tool_schema_converts_to_gemini_function_declaration():
 
     assert converted.name == "intend"
     assert converted.description == "Declare an intent."
+
+
+@pytest.mark.asyncio
+async def test_openai_reasoning_model_uses_none_effort_with_tools():
+    calls = []
+
+    class Completions:
+        async def create(self, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content="ok", tool_calls=[]),
+                        finish_reason="stop",
+                    )
+                ],
+                usage=SimpleNamespace(prompt_tokens=3, completion_tokens=1),
+            )
+
+    client = LLMClient()
+    client._openai_client = SimpleNamespace(
+        chat=SimpleNamespace(completions=Completions())
+    )
+    tool = {
+        "name": "integrate_insights",
+        "description": "Integrate memories.",
+        "input_schema": {"type": "object", "properties": {}},
+    }
+
+    await client._call_openai(
+        model="gpt-5.5",
+        messages=[{"role": "user", "content": "Reflect."}],
+        system="",
+        tools=[tool],
+        response_format=None,
+        max_tokens=32,
+        temperature=0.2,
+        component="MemoryConsolidator",
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["reasoning_effort"] == "none"
 
 
 @pytest.mark.asyncio
