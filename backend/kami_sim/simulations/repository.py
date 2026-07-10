@@ -189,6 +189,8 @@ class SimulationRepository:
                     session.add(simulation)
                     imported += 1
                     self._apply_record(simulation, record)
+                elif simulation.status == "migrated":
+                    self._apply_record(simulation, record)
                 if not has_active and simulation.id == active_id:
                     session.query(Simulation).filter(
                         Simulation.id != simulation.id,

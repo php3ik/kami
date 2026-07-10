@@ -129,7 +129,9 @@ class KamiWorker:
                     "kami_id": kami_id,
                     "tick": tick,
                     "event_type": inp.get("event_type", "idle"),
-                    "participants": self._normalize_participants(inp.get("participants", [])),
+                    "participants": self._normalize_participants(
+                        inp.get("participants", []), kami_id
+                    ),
                     "narrative": narrative_text,
                     "salience": inp.get("salience", 0.3),
                     "payload": inp.get("payload", {}),
@@ -231,10 +233,16 @@ class KamiWorker:
             return "The moment tightens into a concrete beat, and the people present respond to what is directly in front of them."
         return text
 
-    def _normalize_participants(self, participants: list) -> list[str]:
+    def _normalize_participants(
+        self, participants: list, kami_id: str
+    ) -> list[str]:
         if not participants:
             return []
-        entities = self.session.query(fs.Entity).filter(fs.Entity.kind == "agent").all()
+        simulation_id = fs.resolve_simulation_id(self.session, kami_id)
+        entities = self.session.query(fs.Entity).filter(
+            fs.Entity.simulation_id == simulation_id,
+            fs.Entity.kind == "agent",
+        ).all()
         by_name = {e.canonical_name.lower(): e.entity_id for e in entities}
         by_id = {e.entity_id for e in entities}
         normalized = []

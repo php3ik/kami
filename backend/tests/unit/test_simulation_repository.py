@@ -87,3 +87,23 @@ def test_update_runtime_persists_tick_status_and_cost_delta():
         assert updated["total_cost_usd"] == 2.0
     finally:
         engine.dispose()
+
+
+def test_legacy_import_enriches_migration_placeholder():
+    engine, repository = _repository()
+    try:
+        placeholder = _record("sim-a", "sim-a")
+        placeholder["status"] = "migrated"
+        repository.upsert(placeholder)
+
+        repository.import_legacy_registry({
+            "active_id": "sim-a",
+            "simulations": [_record("sim-a", "Real Name", 3.0)],
+        })
+
+        imported = repository.get("sim-a")
+        assert imported["name"] == "Real Name"
+        assert imported["status"] == "paused"
+        assert repository.read_registry()["active_id"] == "sim-a"
+    finally:
+        engine.dispose()

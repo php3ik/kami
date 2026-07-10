@@ -30,11 +30,16 @@ from ..factstore.models import (
     AgentIntentRecord,
     AgentNeed,
     ConversationThread,
+    Channel,
     Entity,
     Event,
     Location,
+    Message,
+    Ownership,
     PhysicalState,
+    ReadReceipt,
     Relation,
+    Schedule,
     init_db,
 )
 from ..llm.budget import budget
@@ -126,7 +131,11 @@ def _sqlite_path_from_url(db_url: str) -> Path:
     return Path(db_url)
 
 
-def _load_graph_from_data(graph_data: dict | None, session) -> SpatialGraph:
+def _load_graph_from_data(
+    graph_data: dict | None,
+    session,
+    simulation_id: str | None = None,
+) -> SpatialGraph:
     graph = SpatialGraph()
     if graph_data:
         for node in graph_data.get("nodes", []):
@@ -141,10 +150,14 @@ def _load_graph_from_data(graph_data: dict | None, session) -> SpatialGraph:
             )
         return graph
 
-    return _load_graph_from_path(None, session)
+    return _load_graph_from_path(None, session, simulation_id)
 
 
-def _load_graph_from_path(graph_path: str | None, session) -> SpatialGraph:
+def _load_graph_from_path(
+    graph_path: str | None,
+    session,
+    simulation_id: str | None = None,
+) -> SpatialGraph:
     graph = SpatialGraph()
     path = Path(graph_path) if graph_path else Path("sim_graph.json")
     if path.exists():
@@ -161,7 +174,10 @@ def _load_graph_from_path(graph_path: str | None, session) -> SpatialGraph:
             )
         return graph
 
-    kamis = session.query(Entity).filter(Entity.kind == "kami").all()
+    query = session.query(Entity).filter(Entity.kind == "kami")
+    if simulation_id is not None:
+        query = query.filter(Entity.simulation_id == simulation_id)
+    kamis = query.all()
     for kami in kamis:
         graph.add_kami(
             kami.entity_id,
@@ -190,13 +206,26 @@ def _active_kami_ids() -> list[str]:
     return graph.all_kami_ids() if graph else []
 
 
+def _active_simulation_id() -> str:
+    return sim_state.get("active_simulation_id") or "default"
+
+
+def _require_active_entity(entity: Entity | None, entity_id: str) -> Entity:
+    if entity is None or entity.simulation_id != _active_simulation_id():
+        raise HTTPException(status_code=404, detail=f"Entity not found: {entity_id}")
+    return entity
+
+
 def _record_entity_ids(record: dict, session) -> list[str]:
     kami_ids = _record_kami_ids(record)
     if not kami_ids:
         return []
     loc_rows = (
         session.query(Location)
-        .filter(Location.kami_id.in_(kami_ids))
+        .filter(
+            Location.simulation_id == record["id"],
+            Location.kami_id.in_(kami_ids),
+        )
         .all()
     )
     return list({*(kami_ids), *(row.entity_id for row in loc_rows)})
@@ -592,14 +621,14 @@ def _simulation_stats(record: dict) -> dict:
     try:
         kami_ids = _record_kami_ids(record)
         entity_ids = _record_entity_ids(record, session)
-        event_q = session.query(Event)
+        event_q = session.query(Event).filter(Event.simulation_id == record["id"])
         if kami_ids:
             event_q = event_q.filter(Event.kami_id.in_(kami_ids))
         max_tick = event_q.with_entities(func.max(Event.tick)).scalar()
         return {
             "ticks": (int(max_tick) + 1) if max_tick is not None else 0,
-            "population": session.query(Entity).filter(Entity.kind == "agent", Entity.entity_id.in_(entity_ids)).count() if entity_ids else 0,
-            "kami_count": len(kami_ids) if kami_ids else session.query(Entity).filter(Entity.kind == "kami").count(),
+            "population": session.query(Entity).filter(Entity.simulation_id == record["id"], Entity.kind == "agent", Entity.entity_id.in_(entity_ids)).count() if entity_ids else 0,
+            "kami_count": len(kami_ids) if kami_ids else session.query(Entity).filter(Entity.simulation_id == record["id"], Entity.kind == "kami").count(),
             "event_count": event_q.count(),
         }
     finally:
@@ -679,6 +708,7 @@ def _migrate_legacy_file_record(record: dict, main_session) -> dict:
             archetype["simulation_id"] = sim_id
             main_session.add(Entity(
                 entity_id=new_id,
+                simulation_id=sim_id,
                 kind=entity.kind,
                 canonical_name=entity.canonical_name,
                 archetype=archetype,
@@ -692,6 +722,7 @@ def _migrate_legacy_file_record(record: dict, main_session) -> dict:
 
         for row in legacy.query(Location).all():
             main_session.add(Location(
+                simulation_id=sim_id,
                 entity_id=mid(row.entity_id),
                 kami_id=mid(row.kami_id),
                 container_id=mid(row.container_id),
@@ -700,14 +731,24 @@ def _migrate_legacy_file_record(record: dict, main_session) -> dict:
             ))
         for row in legacy.query(PhysicalState).all():
             main_session.add(PhysicalState(
+                simulation_id=sim_id,
                 entity_id=mid(row.entity_id),
                 attribute=row.attribute,
                 value=row.value,
                 since_tick=row.since_tick,
                 valid_until_tick=row.valid_until_tick,
             ))
+        for row in legacy.query(Ownership).all():
+            main_session.add(Ownership(
+                simulation_id=sim_id,
+                entity_id=mid(row.entity_id),
+                owner_id=mid(row.owner_id),
+                since_tick=row.since_tick,
+                valid_until_tick=row.valid_until_tick,
+            ))
         for row in legacy.query(Relation).all():
             main_session.add(Relation(
+                simulation_id=sim_id,
                 from_entity=mid(row.from_entity),
                 to_entity=mid(row.to_entity),
                 rel_type=row.rel_type,
@@ -718,6 +759,7 @@ def _migrate_legacy_file_record(record: dict, main_session) -> dict:
         for row in legacy.query(AgentBelief).all():
             main_session.add(AgentBelief(
                 belief_id=f"{prefix}{row.belief_id}",
+                simulation_id=sim_id,
                 agent_id=mid(row.agent_id),
                 kind=row.kind,
                 target_entity=mid(row.target_entity),
@@ -729,6 +771,7 @@ def _migrate_legacy_file_record(record: dict, main_session) -> dict:
             ))
         for row in legacy.query(AgentNeed).all():
             main_session.add(AgentNeed(
+                simulation_id=sim_id,
                 agent_id=mid(row.agent_id),
                 need=row.need,
                 value=row.value,
@@ -738,6 +781,7 @@ def _migrate_legacy_file_record(record: dict, main_session) -> dict:
         for row in legacy.query(AgentIntentRecord).all():
             main_session.add(AgentIntentRecord(
                 intent_id=f"{prefix}{row.intent_id}",
+                simulation_id=sim_id,
                 tick=row.tick,
                 agent_id=mid(row.agent_id),
                 kami_id=mid(row.kami_id),
@@ -755,6 +799,7 @@ def _migrate_legacy_file_record(record: dict, main_session) -> dict:
         for row in legacy.query(ConversationThread).all():
             main_session.add(ConversationThread(
                 thread_id=f"{prefix}{row.thread_id}",
+                simulation_id=sim_id,
                 kami_id=mid(row.kami_id),
                 participants=[mid(item) for item in (row.participants or [])],
                 topic=row.topic,
@@ -770,6 +815,7 @@ def _migrate_legacy_file_record(record: dict, main_session) -> dict:
         for row in legacy.query(Event).all():
             main_session.add(Event(
                 event_id=f"{prefix}{row.event_id}",
+                simulation_id=sim_id,
                 tick=row.tick,
                 kami_id=mid(row.kami_id),
                 event_type=row.event_type,
@@ -778,6 +824,42 @@ def _migrate_legacy_file_record(record: dict, main_session) -> dict:
                 salience=row.salience,
                 narrative=row.narrative,
                 causes=[f"{prefix}{item}" for item in (row.causes or [])],
+            ))
+        for row in legacy.query(Schedule).all():
+            main_session.add(Schedule(
+                schedule_id=f"{prefix}{row.schedule_id}",
+                simulation_id=sim_id,
+                fires_at_tick=row.fires_at_tick,
+                kami_id=mid(row.kami_id),
+                event_template=row.event_template,
+            ))
+        for row in legacy.query(Channel).all():
+            main_session.add(Channel(
+                channel_id=f"{prefix}{row.channel_id}",
+                simulation_id=sim_id,
+                kind=row.kind,
+                participants=[mid(item) for item in (row.participants or [])],
+                subscribers=[mid(item) for item in (row.subscribers or [])],
+                medium_properties=row.medium_properties,
+                created_at_tick=row.created_at_tick,
+                metadata_=row.metadata_,
+            ))
+        for row in legacy.query(Message).all():
+            main_session.add(Message(
+                message_id=f"{prefix}{row.message_id}",
+                simulation_id=sim_id,
+                channel_id=f"{prefix}{row.channel_id}",
+                sender_id=mid(row.sender_id),
+                content=row.content,
+                sent_at_tick=row.sent_at_tick,
+                salience=row.salience,
+            ))
+        for row in legacy.query(ReadReceipt).all():
+            main_session.add(ReadReceipt(
+                simulation_id=sim_id,
+                message_id=f"{prefix}{row.message_id}",
+                agent_id=mid(row.agent_id),
+                read_at_tick=row.read_at_tick,
             ))
 
         graph_data = None
@@ -835,7 +917,7 @@ def _set_active_simulation(record: dict) -> None:
             if path.exists():
                 graph_data = json.loads(path.read_text(encoding="utf-8"))
                 record["graph_data"] = graph_data
-        spatial_graph = _load_graph_from_data(graph_data, session)
+        spatial_graph = _load_graph_from_data(graph_data, session, record["id"])
         scheduler = TickScheduler(
             session_factory=session_factory,
             spatial_graph=spatial_graph,
@@ -892,19 +974,24 @@ def _update_active_runtime(
     _write_registry(registry)
 
 
-def _next_tick_from_db(session) -> int:
+def _next_tick_from_db(session, simulation_id: str = "default") -> int:
     """Resume after the highest committed event tick in the current database."""
-    max_tick = session.query(func.max(Event.tick)).scalar()
+    max_tick = session.query(func.max(Event.tick)).filter(
+        Event.simulation_id == simulation_id
+    ).scalar()
     return (max_tick + 1) if max_tick is not None else 0
 
 
 def _next_tick_for_record(session, record: dict) -> int:
     kami_ids = _record_kami_ids(record)
     if not kami_ids:
-        return _next_tick_from_db(session)
+        return _next_tick_from_db(session, record["id"])
     max_tick = (
         session.query(func.max(Event.tick))
-        .filter(Event.kami_id.in_(kami_ids))
+        .filter(
+            Event.simulation_id == record["id"],
+            Event.kami_id.in_(kami_ids),
+        )
         .scalar()
     )
     return (max_tick + 1) if max_tick is not None else 0
@@ -940,7 +1027,7 @@ async def lifespan(app: FastAPI):
             session.commit()
         else:
             logger.info(f"Database contains {count} entities, restoring default simulation state...")
-            spatial_graph = _load_graph_from_path("sim_graph.json", session)
+            spatial_graph = _load_graph_from_path("sim_graph.json", session, "default")
         session.close()
 
         default_id = "default"
@@ -1086,20 +1173,30 @@ async def delete_simulation(simulation_id: str):
 
     session = sim_state["session_factory"]()
     try:
-        entity_ids = _record_entity_ids(record, session)
-        if entity_ids:
-            session.query(AgentIntentRecord).filter(AgentIntentRecord.agent_id.in_(entity_ids)).delete(synchronize_session=False)
-            session.query(fs.AgentBelief).filter(fs.AgentBelief.agent_id.in_(entity_ids)).delete(synchronize_session=False)
-            session.query(fs.AgentNeed).filter(fs.AgentNeed.agent_id.in_(entity_ids)).delete(synchronize_session=False)
-            session.query(fs.ConversationThread).filter(fs.ConversationThread.kami_id.in_(entity_ids)).delete(synchronize_session=False)
-            session.query(fs.Relation).filter(
-                (fs.Relation.from_entity.in_(entity_ids)) | (fs.Relation.to_entity.in_(entity_ids))
+        scoped_models = (
+            ReadReceipt,
+            Message,
+            Channel,
+            AgentIntentRecord,
+            AgentBelief,
+            AgentNeed,
+            ConversationThread,
+            Schedule,
+            Relation,
+            PhysicalState,
+            Ownership,
+            Location,
+            Event,
+            Entity,
+        )
+        for model in scoped_models:
+            session.query(model).filter(
+                model.simulation_id == simulation_id
             ).delete(synchronize_session=False)
-            session.query(PhysicalState).filter(PhysicalState.entity_id.in_(entity_ids)).delete(synchronize_session=False)
-            session.query(Location).filter(Location.entity_id.in_(entity_ids)).delete(synchronize_session=False)
-            session.query(Event).filter(Event.kami_id.in_(entity_ids)).delete(synchronize_session=False)
-            session.query(Entity).filter(Entity.entity_id.in_(entity_ids)).delete(synchronize_session=False)
-            session.commit()
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
     finally:
         session.close()
     registry["simulations"] = [item for item in simulations if item.get("id") != simulation_id]
@@ -1179,8 +1276,7 @@ async def get_entity(entity_id: str):
     session = sim_state["session_factory"]()
     try:
         entity = session.get(Entity, entity_id)
-        if not entity:
-            raise HTTPException(status_code=404, detail="Entity not found")
+        entity = _require_active_entity(entity, entity_id)
 
         location = fs.get_current_location(session, entity_id)
         kami_entity = session.get(Entity, location.kami_id) if location and location.kami_id else None
@@ -1189,6 +1285,7 @@ async def get_entity(entity_id: str):
         relations = fs.get_relations(session, entity_id, direction="both")
         recent_events = (
             session.query(Event)
+            .filter(Event.simulation_id == entity.simulation_id)
             .order_by(Event.tick.desc())
             .limit(300)
             .all()
@@ -1244,6 +1341,9 @@ async def get_entity(entity_id: str):
 async def get_kami(kami_id: str):
     session = sim_state["session_factory"]()
     try:
+        kami_entity = _require_active_entity(session.get(Entity, kami_id), kami_id)
+        if kami_entity.kind != "kami":
+            raise HTTPException(status_code=404, detail="Kami not found")
         state = fs.query_kami_state(session, kami_id)
         events = fs.get_events(session, kami_id=kami_id, limit=1000)
         return {
@@ -1269,8 +1369,9 @@ async def get_agent(agent_id: str):
     session = sim_state["session_factory"]()
     try:
         entity = session.get(Entity, agent_id)
-        if not entity:
-            return {"error": "not found"}
+        entity = _require_active_entity(entity, agent_id)
+        if entity.kind != "agent":
+            raise HTTPException(status_code=404, detail="Agent not found")
 
         location = fs.get_current_location(session, agent_id)
         states = fs.get_state(session, agent_id)
@@ -1289,7 +1390,13 @@ async def get_agent(agent_id: str):
                     })
 
         # Search for past events involving the agent
-        recent_events = session.query(fs.Event).order_by(fs.Event.tick.desc()).limit(200).all()
+        recent_events = (
+            session.query(fs.Event)
+            .filter(fs.Event.simulation_id == entity.simulation_id)
+            .order_by(fs.Event.tick.desc())
+            .limit(200)
+            .all()
+        )
         action_history = []
         for e in recent_events:
             comps = e.participants or []
@@ -1329,18 +1436,19 @@ async def get_agent(agent_id: str):
 
 
 def _max_tick(session) -> int:
-    kami_ids = _active_kami_ids()
-    q = session.query(func.max(Event.tick))
-    if kami_ids:
-        q = q.filter(Event.kami_id.in_(kami_ids))
+    q = session.query(func.max(Event.tick)).filter(
+        Event.simulation_id == _active_simulation_id()
+    )
     max_tick = q.scalar()
     return int(max_tick) if max_tick is not None else 0
 
 
 def _location_at_tick(session, entity_id: str, tick: int):
+    scope = fs.resolve_simulation_id(session, entity_id)
     return (
         session.query(Location)
         .filter(
+            Location.simulation_id == scope,
             Location.entity_id == entity_id,
             Location.since_tick <= tick,
             ((Location.valid_until_tick.is_(None)) | (Location.valid_until_tick > tick)),
@@ -1351,9 +1459,11 @@ def _location_at_tick(session, entity_id: str, tick: int):
 
 
 def _states_at_tick(session, entity_id: str, tick: int) -> dict:
+    scope = fs.resolve_simulation_id(session, entity_id)
     rows = (
         session.query(PhysicalState)
         .filter(
+            PhysicalState.simulation_id == scope,
             PhysicalState.entity_id == entity_id,
             PhysicalState.since_tick <= tick,
             ((PhysicalState.valid_until_tick.is_(None)) | (PhysicalState.valid_until_tick > tick)),
@@ -1386,6 +1496,7 @@ async def get_timeline(
 ):
     session = sim_state["session_factory"]()
     try:
+        active_simulation_id = _active_simulation_id()
         max_tick = _max_tick(session)
         end_tick = max_tick if until_tick is None else min(until_tick, max_tick)
         start_tick = max(0, min(since_tick, end_tick))
@@ -1396,12 +1507,20 @@ async def get_timeline(
             agent_ids = [
                 row.entity_id
                 for row in session.query(Location.entity_id)
-                .filter(Location.kami_id.in_(kami_ids), Location.valid_until_tick.is_(None))
+                .filter(
+                    Location.simulation_id == active_simulation_id,
+                    Location.kami_id.in_(kami_ids),
+                    Location.valid_until_tick.is_(None),
+                )
                 .all()
             ]
             entities = (
                 session.query(Entity)
-                .filter(Entity.kind == "agent", Entity.entity_id.in_(agent_ids))
+                .filter(
+                    Entity.simulation_id == active_simulation_id,
+                    Entity.kind == "agent",
+                    Entity.entity_id.in_(agent_ids),
+                )
                 .order_by(Entity.canonical_name)
                 .all()
             )
@@ -1409,7 +1528,11 @@ async def get_timeline(
             kami_ids = _active_kami_ids()
             entities = (
                 session.query(Entity)
-                .filter(Entity.kind == "kami", Entity.entity_id.in_(kami_ids))
+                .filter(
+                    Entity.simulation_id == active_simulation_id,
+                    Entity.kind == "kami",
+                    Entity.entity_id.in_(kami_ids),
+                )
                 .order_by(Entity.canonical_name)
                 .all()
             )
@@ -1417,7 +1540,11 @@ async def get_timeline(
         rows = []
         events = (
             session.query(Event)
-            .filter(Event.tick >= start_tick, Event.tick <= end_tick)
+            .filter(
+                Event.simulation_id == active_simulation_id,
+                Event.tick >= start_tick,
+                Event.tick <= end_tick,
+            )
             .filter(Event.kami_id.in_(_active_kami_ids()))
             .order_by(Event.tick.asc())
             .all()
@@ -1426,7 +1553,11 @@ async def get_timeline(
         if mode == "agents":
             intents = (
                 session.query(AgentIntentRecord)
-                .filter(AgentIntentRecord.tick >= start_tick, AgentIntentRecord.tick <= end_tick)
+                .filter(
+                    AgentIntentRecord.simulation_id == active_simulation_id,
+                    AgentIntentRecord.tick >= start_tick,
+                    AgentIntentRecord.tick <= end_tick,
+                )
                 .all()
             )
 
@@ -1505,15 +1636,17 @@ async def get_timeline_snapshot(kind: str, entity_id: str, tick: int):
     session = sim_state["session_factory"]()
     try:
         entity = session.get(Entity, entity_id)
-        if not entity:
-            return {"error": "not found"}
+        entity = _require_active_entity(entity, entity_id)
 
         if kind == "agent":
             location = _location_at_tick(session, entity_id, tick)
             states = _states_at_tick(session, entity_id, tick)
             events = (
                 session.query(Event)
-                .filter(Event.tick <= tick)
+                .filter(
+                    Event.simulation_id == entity.simulation_id,
+                    Event.tick <= tick,
+                )
                 .order_by(Event.tick.desc())
                 .limit(250)
                 .all()
@@ -1560,6 +1693,7 @@ async def get_timeline_snapshot(kind: str, entity_id: str, tick: int):
             locations = (
                 session.query(Location)
                 .filter(
+                    Location.simulation_id == entity.simulation_id,
                     Location.kami_id == entity_id,
                     Location.since_tick <= tick,
                     ((Location.valid_until_tick.is_(None)) | (Location.valid_until_tick > tick)),
@@ -1603,18 +1737,29 @@ async def get_all_agents():
     try:
         from ..factstore.models import Entity
         from ..factstore.tools import get_current_location
-        agents = session.query(Entity).filter(Entity.kind == "agent").all()
+        active_simulation_id = _active_simulation_id()
+        agents = session.query(Entity).filter(
+            Entity.simulation_id == active_simulation_id,
+            Entity.kind == "agent",
+        ).all()
         kami_ids = _active_kami_ids()
         active_locations = {
             row.entity_id: row
             for row in session.query(Location)
-            .filter(Location.kami_id.in_(kami_ids), Location.valid_until_tick.is_(None))
+            .filter(
+                Location.simulation_id == active_simulation_id,
+                Location.kami_id.in_(kami_ids),
+                Location.valid_until_tick.is_(None),
+            )
             .all()
         }
         results = []
         recent_events = (
             session.query(fs.Event)
-            .filter(fs.Event.kami_id.in_(kami_ids))
+            .filter(
+                fs.Event.simulation_id == active_simulation_id,
+                fs.Event.kami_id.in_(kami_ids),
+            )
             .order_by(fs.Event.tick.desc())
             .limit(500)
             .all()
@@ -1659,6 +1804,7 @@ async def get_events(
         events = fs.get_events(
             session, kami_id=kami_id, since_tick=since_tick,
             until_tick=until_tick, limit=limit,
+            simulation_id=_active_simulation_id(),
         )
         if kami_id is None:
             active = set(_active_kami_ids())

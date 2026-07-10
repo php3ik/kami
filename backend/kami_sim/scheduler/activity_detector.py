@@ -20,7 +20,13 @@ def detect_active_kami(
 ) -> set[str]:
     """Determine which kami need rendering this tick."""
     active = set()
-    due_kami_ids = {schedule.kami_id for schedule in fs.get_due_schedules(session, tick)}
+    simulation_id = fs.resolve_simulation_id(
+        session, all_kami_ids[0] if all_kami_ids else None
+    )
+    due_kami_ids = {
+        schedule.kami_id
+        for schedule in fs.get_due_schedules(session, tick, simulation_id)
+    }
 
     for kami_id in all_kami_ids:
         # (a) Kami with at least one agent inside

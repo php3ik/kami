@@ -35,6 +35,36 @@ def _gen_id(prefix: str = "") -> str:
     return f"{prefix}{uuid.uuid4().hex[:12]}"
 
 
+def simulation_id_from_scoped_id(value: str | None) -> str:
+    if value and value.startswith("sim_") and "__" in value:
+        return value[4:].split("__", 1)[0] or "default"
+    return "default"
+
+
+def resolve_simulation_id(
+    session: Session,
+    *entity_ids: str | None,
+    explicit: str | None = None,
+) -> str:
+    """Resolve one simulation scope and reject cross-world inputs."""
+    scopes = set()
+    for entity_id in entity_ids:
+        if not entity_id:
+            continue
+        entity = session.get(Entity, entity_id)
+        if entity is not None:
+            scopes.add(entity.simulation_id)
+            continue
+        inferred = simulation_id_from_scoped_id(entity_id)
+        if inferred != "default":
+            scopes.add(inferred)
+    if explicit:
+        scopes.add(explicit)
+    if len(scopes) > 1:
+        raise ValueError(f"Cross-simulation operation is not allowed: {sorted(scopes)}")
+    return next(iter(scopes), explicit or "default")
+
+
 # --- Entity operations ---
 
 
@@ -48,6 +78,7 @@ def create_entity(
     reason_event_id: str | None = None,
     kami_id: str | None = None,
     quota_tracker: dict | None = None,
+    simulation_id: str | None = None,
 ) -> Entity:
     """Create a new entity with quota enforcement."""
     valid_kinds = {
@@ -68,8 +99,15 @@ def create_entity(
         quota_tracker[key] = count + 1
 
     eid = entity_id or _gen_id(f"{kind}_")
+    scope = resolve_simulation_id(
+        session,
+        kami_id,
+        eid,
+        explicit=simulation_id or (archetype or {}).get("simulation_id"),
+    )
     entity = Entity(
         entity_id=eid,
+        simulation_id=scope,
         kind=kind,
         canonical_name=canonical_name,
         archetype=archetype or {},
@@ -119,9 +157,11 @@ def _close_temporal(session: Session, model, field_name: str, value: str, tick: 
 
 def get_current_location(session: Session, entity_id: str) -> Location | None:
     """Get the current location of an entity."""
+    scope = resolve_simulation_id(session, entity_id)
     return (
         session.query(Location)
         .filter(
+            Location.simulation_id == scope,
             Location.entity_id == entity_id,
             Location.valid_until_tick.is_(None),
         )
@@ -149,12 +189,16 @@ def move_entity(
         container = session.get(Entity, container_id)
         if container is None:
             raise ValueError(f"Container {container_id} not found")
+    scope = resolve_simulation_id(
+        session, entity_id, to_kami_id, container_id
+    )
 
     # Close current location
     _close_temporal(session, Location, "entity_id", entity_id, tick)
 
     # Insert new
     loc = Location(
+        simulation_id=scope,
         entity_id=entity_id,
         kami_id=to_kami_id,
         container_id=container_id,
@@ -174,7 +218,15 @@ def place_entity(
     container_id: str | None = None,
 ) -> Location:
     """Initial placement (no prior location required)."""
+    entity = session.get(Entity, entity_id)
+    kami = session.get(Entity, kami_id)
+    if entity is None or kami is None:
+        raise ValueError("Entity and destination kami must exist before placement")
+    if container_id and session.get(Entity, container_id) is None:
+        raise ValueError(f"Container {container_id} not found")
+    scope = resolve_simulation_id(session, entity_id, kami_id, container_id)
     loc = Location(
+        simulation_id=scope,
         entity_id=entity_id,
         kami_id=kami_id,
         container_id=container_id,
@@ -206,6 +258,7 @@ def change_state(
     current = (
         session.query(PhysicalState)
         .filter(
+            PhysicalState.simulation_id == entity.simulation_id,
             PhysicalState.entity_id == entity_id,
             PhysicalState.attribute == attribute,
             PhysicalState.valid_until_tick.is_(None),
@@ -218,6 +271,7 @@ def change_state(
         current.valid_until_tick = tick
 
     state = PhysicalState(
+        simulation_id=entity.simulation_id,
         entity_id=entity_id,
         attribute=attribute,
         value=new_value,
@@ -243,7 +297,9 @@ def get_state(
     session: Session, entity_id: str, attribute: str | None = None
 ) -> list[PhysicalState]:
     """Get current physical state(s) of an entity."""
+    scope = resolve_simulation_id(session, entity_id)
     q = session.query(PhysicalState).filter(
+        PhysicalState.simulation_id == scope,
         PhysicalState.entity_id == entity_id,
         PhysicalState.valid_until_tick.is_(None),
     )
@@ -264,12 +320,15 @@ def transfer_ownership(
 ) -> Ownership:
     """Transfer ownership of an entity."""
     for eid in (entity_id, new_owner_id):
-        if session.get(Entity, eid) is None:
+        entity = session.get(Entity, eid)
+        if entity is None:
             raise ValueError(f"Entity {eid} not found")
+    scope = resolve_simulation_id(session, entity_id, new_owner_id)
 
     _close_temporal(session, Ownership, "entity_id", entity_id, tick)
 
     own = Ownership(
+        simulation_id=scope,
         entity_id=entity_id,
         owner_id=new_owner_id,
         since_tick=tick,
@@ -296,11 +355,13 @@ def update_relation(
     for eid in (from_entity, to_entity):
         if session.get(Entity, eid) is None:
             raise ValueError(f"Entity {eid} not found")
+    scope = resolve_simulation_id(session, from_entity, to_entity)
 
     # Close existing relation of same type
     existing = (
         session.query(Relation)
         .filter(
+            Relation.simulation_id == scope,
             Relation.from_entity == from_entity,
             Relation.to_entity == to_entity,
             Relation.rel_type == rel_type,
@@ -312,6 +373,7 @@ def update_relation(
         existing.valid_until_tick = tick
 
     rel = Relation(
+        simulation_id=scope,
         from_entity=from_entity,
         to_entity=to_entity,
         rel_type=rel_type,
@@ -331,18 +393,22 @@ def get_relations(
     direction: str = "outgoing",
 ) -> list[Relation]:
     """Get current relations for an entity."""
+    scope = resolve_simulation_id(session, entity_id)
     if direction == "outgoing":
         q = session.query(Relation).filter(
+            Relation.simulation_id == scope,
             Relation.from_entity == entity_id,
             Relation.valid_until_tick.is_(None),
         )
     elif direction == "incoming":
         q = session.query(Relation).filter(
+            Relation.simulation_id == scope,
             Relation.to_entity == entity_id,
             Relation.valid_until_tick.is_(None),
         )
     else:  # both
         q = session.query(Relation).filter(
+            Relation.simulation_id == scope,
             (Relation.from_entity == entity_id) | (Relation.to_entity == entity_id),
             Relation.valid_until_tick.is_(None),
         )
@@ -365,11 +431,19 @@ def emit_event(
     narrative: str = "",
     causes: list[str] | None = None,
     event_id: str | None = None,
+    simulation_id: str | None = None,
 ) -> Event:
     """Emit an event to the log."""
     eid = event_id or _gen_id("evt_")
+    scope = resolve_simulation_id(
+        session,
+        kami_id,
+        *(participants or []),
+        explicit=simulation_id,
+    )
     event = Event(
         event_id=eid,
+        simulation_id=scope,
         tick=tick,
         kami_id=kami_id,
         event_type=event_type,
@@ -390,9 +464,15 @@ def get_events(
     since_tick: int | None = None,
     until_tick: int | None = None,
     limit: int = 20,
+    simulation_id: str | None = None,
 ) -> list[Event]:
     """Query events with optional filters."""
     q = session.query(Event)
+    scope = simulation_id
+    if scope is None and kami_id:
+        scope = resolve_simulation_id(session, kami_id)
+    if scope is not None:
+        q = q.filter(Event.simulation_id == scope)
     if kami_id:
         q = q.filter(Event.kami_id == kami_id)
     if since_tick is not None:
@@ -408,9 +488,14 @@ def get_events(
 def query_kami_state(session: Session, kami_id: str) -> dict:
     """Get full state snapshot for a kami: entities, states, relations."""
     # All entities currently in this kami
+    scope = resolve_simulation_id(session, kami_id)
     locations = (
         session.query(Location)
-        .filter(Location.kami_id == kami_id, Location.valid_until_tick.is_(None))
+        .filter(
+            Location.simulation_id == scope,
+            Location.kami_id == kami_id,
+            Location.valid_until_tick.is_(None),
+        )
         .all()
     )
     entity_ids = [loc.entity_id for loc in locations]
@@ -442,9 +527,14 @@ def query_kami_state(session: Session, kami_id: str) -> dict:
 
 def get_entities_in_kami(session: Session, kami_id: str) -> list[Entity]:
     """Get all entities currently located in a kami."""
+    scope = resolve_simulation_id(session, kami_id)
     locations = (
         session.query(Location)
-        .filter(Location.kami_id == kami_id, Location.valid_until_tick.is_(None))
+        .filter(
+            Location.simulation_id == scope,
+            Location.kami_id == kami_id,
+            Location.valid_until_tick.is_(None),
+        )
         .all()
     )
     entity_ids = [loc.entity_id for loc in locations]
@@ -471,8 +561,13 @@ def update_belief(
     source_event_id: str | None = None,
 ) -> AgentBelief:
     """Update or create an agent's subjective belief."""
+    agent = session.get(Entity, agent_id)
+    if agent is None:
+        raise ValueError(f"Agent {agent_id} not found")
+    scope = resolve_simulation_id(session, agent_id, target_entity)
     belief = AgentBelief(
         belief_id=_gen_id("blf_"),
+        simulation_id=scope,
         agent_id=agent_id,
         kind=kind,
         target_entity=target_entity,
@@ -491,7 +586,11 @@ def get_beliefs(
     session: Session, agent_id: str, kind: str | None = None
 ) -> list[AgentBelief]:
     """Get an agent's current beliefs."""
-    q = session.query(AgentBelief).filter(AgentBelief.agent_id == agent_id)
+    scope = resolve_simulation_id(session, agent_id)
+    q = session.query(AgentBelief).filter(
+        AgentBelief.simulation_id == scope,
+        AgentBelief.agent_id == agent_id,
+    )
     if kind:
         q = q.filter(AgentBelief.kind == kind)
     return q.all()
@@ -516,12 +615,14 @@ def set_agent_need(
     value: float,
     tick: int,
 ) -> AgentNeed:
-    if session.get(Entity, agent_id) is None:
+    agent = session.get(Entity, agent_id)
+    if agent is None:
         raise ValueError(f"Agent {agent_id} not found")
     value = max(0.0, min(1.0, float(value)))
     existing = (
         session.query(AgentNeed)
         .filter(
+            AgentNeed.simulation_id == agent.simulation_id,
             AgentNeed.agent_id == agent_id,
             AgentNeed.need == need,
             AgentNeed.valid_until_tick.is_(None),
@@ -530,16 +631,27 @@ def set_agent_need(
     )
     if existing:
         existing.valid_until_tick = tick
-    row = AgentNeed(agent_id=agent_id, need=need, value=value, since_tick=tick)
+    row = AgentNeed(
+        simulation_id=agent.simulation_id,
+        agent_id=agent_id,
+        need=need,
+        value=value,
+        since_tick=tick,
+    )
     session.add(row)
     session.flush()
     return row
 
 
 def get_agent_needs(session: Session, agent_id: str) -> dict[str, float]:
+    scope = resolve_simulation_id(session, agent_id)
     rows = (
         session.query(AgentNeed)
-        .filter(AgentNeed.agent_id == agent_id, AgentNeed.valid_until_tick.is_(None))
+        .filter(
+            AgentNeed.simulation_id == scope,
+            AgentNeed.agent_id == agent_id,
+            AgentNeed.valid_until_tick.is_(None),
+        )
         .all()
     )
     values = dict(DEFAULT_NEEDS)
@@ -580,10 +692,13 @@ def record_agent_intent(
     intent_id: str | None = None,
     pressure: dict | None = None,
 ) -> AgentIntentRecord:
-    if session.get(Entity, agent_id) is None:
+    agent = session.get(Entity, agent_id)
+    if agent is None:
         raise ValueError(f"Agent {agent_id} not found")
+    scope = resolve_simulation_id(session, agent_id, kami_id)
     row = AgentIntentRecord(
         intent_id=intent_id or _gen_id("int_"),
+        simulation_id=scope,
         tick=tick,
         agent_id=agent_id,
         kami_id=kami_id,
@@ -605,6 +720,8 @@ def get_recent_intents(
     limit: int = 8,
 ) -> list[AgentIntentRecord]:
     q = session.query(AgentIntentRecord)
+    scope = resolve_simulation_id(session, agent_id, kami_id)
+    q = q.filter(AgentIntentRecord.simulation_id == scope)
     if agent_id:
         q = q.filter(AgentIntentRecord.agent_id == agent_id)
     if kami_id:
@@ -638,7 +755,14 @@ def settle_tick_intents(
     participants: list[str],
     narrative: str,
 ) -> None:
-    rows = session.query(AgentIntentRecord).filter(AgentIntentRecord.tick == tick).all()
+    event = session.get(Event, event_id)
+    scope = event.simulation_id if event is not None else resolve_simulation_id(
+        session, *(participants or [])
+    )
+    rows = session.query(AgentIntentRecord).filter(
+        AgentIntentRecord.simulation_id == scope,
+        AgentIntentRecord.tick == tick,
+    ).all()
     participant_set = set(participants or [])
     for row in rows:
         if row.status != "pending":
@@ -667,12 +791,16 @@ def upsert_conversation_thread(
     thread_id: str | None = None,
     last_event_id: str | None = None,
 ) -> ConversationThread:
+    scope = resolve_simulation_id(session, kami_id, *(participants or []))
     row = session.get(ConversationThread, thread_id) if thread_id else None
+    if row is not None and row.simulation_id != scope:
+        raise ValueError("Conversation thread belongs to another simulation")
     if row is None:
         participant_set = set(participants or [])
         active = (
             session.query(ConversationThread)
             .filter(
+                ConversationThread.simulation_id == scope,
                 ConversationThread.kami_id == kami_id,
                 ConversationThread.status == "active",
             )
@@ -685,6 +813,7 @@ def upsert_conversation_thread(
     if row is None:
         row = ConversationThread(
             thread_id=thread_id or _gen_id("thr_"),
+            simulation_id=scope,
             kami_id=kami_id,
             participants=participants or [],
             topic=topic or "unfinished exchange",
@@ -712,7 +841,11 @@ def get_active_conversations(
     agent_id: str | None = None,
     limit: int = 5,
 ) -> list[ConversationThread]:
-    q = session.query(ConversationThread).filter(ConversationThread.status == "active")
+    scope = resolve_simulation_id(session, kami_id, agent_id)
+    q = session.query(ConversationThread).filter(
+        ConversationThread.simulation_id == scope,
+        ConversationThread.status == "active",
+    )
     if kami_id:
         q = q.filter(ConversationThread.kami_id == kami_id)
     rows = q.order_by(ConversationThread.last_tick.desc()).limit(limit * 3).all()
@@ -730,8 +863,10 @@ def create_schedule(
     kami_id: str,
     event_template: dict,
 ) -> Schedule:
+    scope = resolve_simulation_id(session, kami_id)
     sched = Schedule(
         schedule_id=_gen_id("sched_"),
+        simulation_id=scope,
         fires_at_tick=fires_at_tick,
         kami_id=kami_id,
         event_template=event_template,
@@ -741,5 +876,12 @@ def create_schedule(
     return sched
 
 
-def get_due_schedules(session: Session, tick: int) -> list[Schedule]:
-    return session.query(Schedule).filter(Schedule.fires_at_tick == tick).all()
+def get_due_schedules(
+    session: Session,
+    tick: int,
+    simulation_id: str | None = None,
+) -> list[Schedule]:
+    query = session.query(Schedule).filter(Schedule.fires_at_tick == tick)
+    if simulation_id is not None:
+        query = query.filter(Schedule.simulation_id == simulation_id)
+    return query.all()

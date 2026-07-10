@@ -168,9 +168,6 @@ def _validate_intent_target(
 
     if target in present_ids:
         return None
-    if session.get(Entity, target) is not None:
-        return None
-
     if action in {"talk", "observe", "use_object", "work"}:
         if _looks_like_unknown_target(target):
             return {**intent, "reason": "ambiguous unknown target is not a concrete entity id"}

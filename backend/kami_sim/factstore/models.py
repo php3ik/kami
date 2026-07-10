@@ -68,6 +68,7 @@ class Entity(Base):
     __tablename__ = "entities"
 
     entity_id = Column(String, primary_key=True)
+    simulation_id = Column(String, nullable=False, default="default")
     kind = Column(
         String, nullable=False
     )  # agent, object, kami, animal, plant, vehicle, document, channel
@@ -76,7 +77,10 @@ class Entity(Base):
     created_at_tick = Column(Integer, nullable=False, default=0)
     created_by_event = Column(String, nullable=True)
 
-    __table_args__ = (Index("ix_entities_kind", "kind"),)
+    __table_args__ = (
+        Index("ix_entities_kind", "kind"),
+        Index("ix_entities_sim_kind", "simulation_id", "kind"),
+    )
 
 
 class Location(Base):
@@ -85,6 +89,7 @@ class Location(Base):
     __tablename__ = "locations"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    simulation_id = Column(String, nullable=False, default="default")
     entity_id = Column(String, ForeignKey("entities.entity_id"), nullable=False)
     kami_id = Column(String, ForeignKey("entities.entity_id"), nullable=False)
     container_id = Column(String, ForeignKey("entities.entity_id"), nullable=True)
@@ -94,6 +99,18 @@ class Location(Base):
     __table_args__ = (
         Index("ix_locations_entity_current", "entity_id", "valid_until_tick"),
         Index("ix_locations_kami_current", "kami_id", "valid_until_tick"),
+        Index(
+            "ix_locations_sim_entity_current",
+            "simulation_id",
+            "entity_id",
+            "valid_until_tick",
+        ),
+        Index(
+            "ix_locations_sim_kami_current",
+            "simulation_id",
+            "kami_id",
+            "valid_until_tick",
+        ),
     )
 
 
@@ -103,6 +120,7 @@ class Ownership(Base):
     __tablename__ = "ownership"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    simulation_id = Column(String, nullable=False, default="default")
     entity_id = Column(String, ForeignKey("entities.entity_id"), nullable=False)
     owner_id = Column(String, ForeignKey("entities.entity_id"), nullable=False)
     since_tick = Column(Integer, nullable=False)
@@ -110,6 +128,12 @@ class Ownership(Base):
 
     __table_args__ = (
         Index("ix_ownership_entity_current", "entity_id", "valid_until_tick"),
+        Index(
+            "ix_ownership_sim_entity_current",
+            "simulation_id",
+            "entity_id",
+            "valid_until_tick",
+        ),
     )
 
 
@@ -119,6 +143,7 @@ class PhysicalState(Base):
     __tablename__ = "physical_state"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    simulation_id = Column(String, nullable=False, default="default")
     entity_id = Column(String, ForeignKey("entities.entity_id"), nullable=False)
     attribute = Column(String, nullable=False)
     value = Column(JSON, nullable=False)
@@ -128,6 +153,13 @@ class PhysicalState(Base):
     __table_args__ = (
         Index(
             "ix_physstate_entity_attr_current",
+            "entity_id",
+            "attribute",
+            "valid_until_tick",
+        ),
+        Index(
+            "ix_physstate_sim_entity_attr_current",
+            "simulation_id",
             "entity_id",
             "attribute",
             "valid_until_tick",
@@ -156,6 +188,7 @@ class Relation(Base):
     __tablename__ = "relations"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    simulation_id = Column(String, nullable=False, default="default")
     from_entity = Column(String, ForeignKey("entities.entity_id"), nullable=False)
     to_entity = Column(String, ForeignKey("entities.entity_id"), nullable=False)
     rel_type = Column(String, nullable=False)
@@ -166,6 +199,13 @@ class Relation(Base):
     __table_args__ = (
         Index(
             "ix_relations_from_type_current",
+            "from_entity",
+            "rel_type",
+            "valid_until_tick",
+        ),
+        Index(
+            "ix_relations_sim_from_type_current",
+            "simulation_id",
             "from_entity",
             "rel_type",
             "valid_until_tick",
@@ -196,6 +236,7 @@ class Event(Base):
     __tablename__ = "events"
 
     event_id = Column(String, primary_key=True)
+    simulation_id = Column(String, nullable=False, default="default")
     tick = Column(Integer, nullable=False)
     kami_id = Column(String, ForeignKey("entities.entity_id"), nullable=True)
     event_type = Column(String, nullable=False)
@@ -208,6 +249,8 @@ class Event(Base):
     __table_args__ = (
         Index("ix_events_tick", "tick"),
         Index("ix_events_kami_tick", "kami_id", "tick"),
+        Index("ix_events_sim_tick", "simulation_id", "tick"),
+        Index("ix_events_sim_kami_tick", "simulation_id", "kami_id", "tick"),
     )
 
 
@@ -217,6 +260,7 @@ class AgentBelief(Base):
     __tablename__ = "agent_beliefs"
 
     belief_id = Column(String, primary_key=True)
+    simulation_id = Column(String, nullable=False, default="default")
     agent_id = Column(String, ForeignKey("entities.entity_id"), nullable=False)
     kind = Column(String, nullable=False)  # location, state, relation, fact
     target_entity = Column(String, nullable=True)
@@ -228,6 +272,7 @@ class AgentBelief(Base):
 
     __table_args__ = (
         Index("ix_beliefs_agent", "agent_id"),
+        Index("ix_beliefs_sim_agent", "simulation_id", "agent_id"),
     )
 
 
@@ -237,6 +282,7 @@ class AgentIntentRecord(Base):
     __tablename__ = "agent_intents"
 
     intent_id = Column(String, primary_key=True)
+    simulation_id = Column(String, nullable=False, default="default")
     tick = Column(Integer, nullable=False)
     agent_id = Column(String, ForeignKey("entities.entity_id"), nullable=False)
     kami_id = Column(String, ForeignKey("entities.entity_id"), nullable=True)
@@ -258,6 +304,18 @@ class AgentIntentRecord(Base):
         Index("ix_agent_intents_agent_tick", "agent_id", "tick"),
         Index("ix_agent_intents_kami_tick", "kami_id", "tick"),
         Index("ix_agent_intents_status", "status"),
+        Index(
+            "ix_agent_intents_sim_agent_tick",
+            "simulation_id",
+            "agent_id",
+            "tick",
+        ),
+        Index(
+            "ix_agent_intents_sim_kami_tick",
+            "simulation_id",
+            "kami_id",
+            "tick",
+        ),
     )
 
 
@@ -267,6 +325,7 @@ class ConversationThread(Base):
     __tablename__ = "conversation_threads"
 
     thread_id = Column(String, primary_key=True)
+    simulation_id = Column(String, nullable=False, default="default")
     kami_id = Column(String, ForeignKey("entities.entity_id"), nullable=True)
     participants = Column(JSON, default=list)
     topic = Column(String, nullable=False)
@@ -282,6 +341,12 @@ class ConversationThread(Base):
     __table_args__ = (
         Index("ix_threads_kami_status", "kami_id", "status"),
         Index("ix_threads_last_tick", "last_tick"),
+        Index(
+            "ix_threads_sim_kami_status",
+            "simulation_id",
+            "kami_id",
+            "status",
+        ),
     )
 
 
@@ -291,6 +356,7 @@ class AgentNeed(Base):
     __tablename__ = "agent_needs"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    simulation_id = Column(String, nullable=False, default="default")
     agent_id = Column(String, ForeignKey("entities.entity_id"), nullable=False)
     need = Column(String, nullable=False)
     value = Column(Float, nullable=False, default=0.0)
@@ -299,6 +365,13 @@ class AgentNeed(Base):
 
     __table_args__ = (
         Index("ix_agent_needs_current", "agent_id", "need", "valid_until_tick"),
+        Index(
+            "ix_agent_needs_sim_current",
+            "simulation_id",
+            "agent_id",
+            "need",
+            "valid_until_tick",
+        ),
     )
 
 
@@ -308,12 +381,14 @@ class Schedule(Base):
     __tablename__ = "schedules"
 
     schedule_id = Column(String, primary_key=True)
+    simulation_id = Column(String, nullable=False, default="default")
     fires_at_tick = Column(Integer, nullable=False)
     kami_id = Column(String, ForeignKey("entities.entity_id"), nullable=False)
     event_template = Column(JSON, nullable=False)
 
     __table_args__ = (
         Index("ix_schedules_tick", "fires_at_tick"),
+        Index("ix_schedules_sim_tick", "simulation_id", "fires_at_tick"),
     )
 
 
@@ -323,12 +398,17 @@ class Channel(Base):
     __tablename__ = "channels"
 
     channel_id = Column(String, primary_key=True)
+    simulation_id = Column(String, nullable=False, default="default")
     kind = Column(String, nullable=False)
     participants = Column(JSON, default=list)
     subscribers = Column(JSON, default=list)
     medium_properties = Column(JSON, default=dict)
     created_at_tick = Column(Integer, nullable=False, default=0)
     metadata_ = Column("metadata", JSON, default=dict)
+
+    __table_args__ = (
+        Index("ix_channels_simulation", "simulation_id"),
+    )
 
 
 class Message(Base):
@@ -337,6 +417,7 @@ class Message(Base):
     __tablename__ = "messages"
 
     message_id = Column(String, primary_key=True)
+    simulation_id = Column(String, nullable=False, default="default")
     channel_id = Column(String, ForeignKey("channels.channel_id"), nullable=False)
     sender_id = Column(String, ForeignKey("entities.entity_id"), nullable=False)
     content = Column(Text, nullable=False)
@@ -345,6 +426,12 @@ class Message(Base):
 
     __table_args__ = (
         Index("ix_messages_channel_tick", "channel_id", "sent_at_tick"),
+        Index(
+            "ix_messages_sim_channel_tick",
+            "simulation_id",
+            "channel_id",
+            "sent_at_tick",
+        ),
     )
 
 
@@ -354,12 +441,14 @@ class ReadReceipt(Base):
     __tablename__ = "read_receipts"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    simulation_id = Column(String, nullable=False, default="default")
     message_id = Column(String, ForeignKey("messages.message_id"), nullable=False)
     agent_id = Column(String, ForeignKey("entities.entity_id"), nullable=False)
     read_at_tick = Column(Integer, nullable=False)
 
     __table_args__ = (
         UniqueConstraint("message_id", "agent_id", name="uq_read_receipt"),
+        Index("ix_receipts_sim_agent", "simulation_id", "agent_id"),
     )
 
 

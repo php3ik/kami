@@ -4,6 +4,7 @@ import httpx
 import pytest
 
 from kami_sim.api import server
+from kami_sim.factstore import tools as fs
 
 
 @pytest.mark.asyncio
@@ -38,6 +39,28 @@ async def test_lifespan_imports_legacy_registry_into_database(tmp_path, monkeypa
     server.sim_state["scheduler"] = None
 
     async with server.lifespan(server.app):
+        session = server.sim_state["session_factory"]()
+        try:
+            fs.create_entity(
+                session,
+                "object",
+                "Visible",
+                0,
+                entity_id="sim_legacy-sim__visible",
+                simulation_id="legacy-sim",
+            )
+            fs.create_entity(
+                session,
+                "object",
+                "Hidden",
+                0,
+                entity_id="sim_other__hidden",
+                simulation_id="other",
+            )
+            session.commit()
+        finally:
+            session.close()
+
         transport = httpx.ASGITransport(app=server.app)
         async with httpx.AsyncClient(
             transport=transport, base_url="http://test"
@@ -48,6 +71,12 @@ async def test_lifespan_imports_legacy_registry_into_database(tmp_path, monkeypa
             assert payload["active_id"] == "legacy-sim"
             assert payload["simulations"][0]["name"] == "Legacy World"
             assert server.sim_state["simulation_repository"].get("legacy-sim") is not None
+            assert (
+                await client.get("/api/entity/sim_legacy-sim__visible")
+            ).status_code == 200
+            assert (
+                await client.get("/api/entity/sim_other__hidden")
+            ).status_code == 404
 
     # The file is import-only; runtime writes are persisted in the database.
     assert json.loads(registry_path.read_text(encoding="utf-8"))["active_id"] == "legacy-sim"

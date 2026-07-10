@@ -296,7 +296,12 @@ class TickScheduler:
         target = (raw_target or "").strip()
         if not target:
             return ""
-        if session.get(fs.Entity, target) is not None:
+        target_entity = session.get(fs.Entity, target)
+        simulation_id = fs.resolve_simulation_id(session, kami_id)
+        if (
+            target_entity is not None
+            and target_entity.simulation_id == simulation_id
+        ):
             return target
         if target in self.spatial_graph.get_neighbors(kami_id):
             return target
