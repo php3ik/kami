@@ -33,10 +33,22 @@ def _non_negative_float_env(name: str, default: str = "0") -> float:
     return value
 
 
+def _bool_env(name: str, default: str = "true") -> bool:
+    value = os.getenv(name, default).strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean")
+
+
 @dataclass
 class SimConfig:
     # Time
     tick_in_sim_minutes: int = 1
+    adaptive_time_stepping: bool = field(
+        default_factory=lambda: _bool_env("ADAPTIVE_TIME_STEPPING", "true")
+    )
 
     # Activation
     kami_wake_salience_threshold: float = 0.3

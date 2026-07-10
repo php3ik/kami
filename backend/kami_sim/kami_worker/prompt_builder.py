@@ -12,7 +12,12 @@ from typing import Any
 from ..comms.channels import get_kami_notifications
 from ..eventbus.bus import EventBus
 from ..factstore.models import Entity
-from ..factstore.tools import get_active_conversations, get_events, query_kami_state
+from ..factstore.tools import (
+    get_active_conversations,
+    get_due_schedules,
+    get_events,
+    query_kami_state,
+)
 from ..memory import memory_runtime
 from ..spatial.graph import SpatialGraph
 from sqlalchemy.orm import Session
@@ -24,7 +29,7 @@ SYSTEM_PROMPT = (Path(__file__).parent / "system_prompts" / "kami_system.txt").r
 KAMI_TOOLS = [
     {
         "name": "move_entity",
-        "description": "Move an entity to an adjacent kami.",
+        "description": "Schedule an agent to leave for an adjacent kami. Departure occurs next tick and arrival one tick later.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -259,6 +264,13 @@ def build_kami_prompt(
     # 8. Pending external events
     pending = event_bus.get_pending_events(tick, kami_id)
     pending_block = _format_pending_events(pending)
+    scheduled_block = _format_schedules(
+        schedule
+        for schedule in get_due_schedules(
+            session, tick, kami_entity.simulation_id
+        )
+        if schedule.kami_id == kami_id
+    )
     notification_block = _format_notifications(
         get_kami_notifications(session, kami_id, tick)
     )
@@ -299,6 +311,9 @@ def build_kami_prompt(
 ### Pending External Events
 {pending_block or "None."}
 
+### Scheduled Events Due Now
+{scheduled_block or "None."}
+
 ### Device Notifications In This Place
 {notification_block or "None."}
 
@@ -306,7 +321,7 @@ def build_kami_prompt(
 {adjacent_block}
 
 ### Task
-Resolve this tick. Call tools for any state changes. When using move_entity, you MUST use one of the exact kami IDs listed in Adjacent Locations above. End with exactly one emit_event call summarizing what happened."""
+Resolve this tick. Call tools for any state changes. When using move_entity, you MUST use one of the exact kami IDs listed in Adjacent Locations above. Agent movement schedules travel; do not narrate immediate arrival. End with exactly one emit_event call summarizing what happened."""
 
     messages = [{"role": "user", "content": user_content}]
 
@@ -433,4 +448,12 @@ def _format_notifications(notifications: list[dict]) -> str:
         f"- {item['description']} for {item['recipient_id']} "
         f"(salience={item['salience']:.2f}, message_id={item['message_id']})"
         for item in notifications
+    )
+
+
+def _format_schedules(schedules) -> str:
+    return "\n".join(
+        f"- schedule_id={schedule.schedule_id}: "
+        f"{json.dumps(schedule.event_template or {}, ensure_ascii=False)}"
+        for schedule in schedules
     )

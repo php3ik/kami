@@ -12,6 +12,7 @@ The core idea is to separate subjective cognition from objective reality. Agents
 - Persistent, simulation-isolated agent memory with episodic recall, daily summaries, semantic insights, and life narratives.
 - Durable Kami memory with daily place histories, bounded prompt context, and permanent high-salience imprints.
 - Durable non-local communications with direct/group channels, delayed delivery, cognition-time read receipts, phone-call wake triggers, pull-based social feeds, and group rate limits.
+- Two-phase inter-Kami travel with a durable non-rendered transit state, plus adaptive sparse time jumps across dormant periods.
 - Multi-provider LLM routing for Anthropic, OpenAI, and Gemini, with cheap/strong model tiers.
 - In-app settings panel for LLM provider, model names, API tokens, and image-generation model settings.
 - Tick-based simulation with agent cognition, Kami scene resolution, state mutation, event logging, and WebSocket updates.
@@ -157,6 +158,15 @@ their delivery is available. Successful cognition creates the read receipt in
 the same atomic tick transaction. High-salience messages and ringing calls can
 wake remote recipients, while public posts remain pull-based. The agent
 inspector exposes channel history, unread state, delivery mode, and call state.
+Inter-Kami movement never teleports an agent: a move accepted on tick `N`
+keeps the agent at the source for that tick, places them in the non-rendered
+transit location on `N+1`, and arrives them at the destination on `N+2`.
+Transit journeys and both phase events are durable and simulation-isolated.
+When every agent is explicitly sleeping/dormant, adaptive time-stepping jumps
+to the next schedule, forced communication wake, transit phase, propagated
+event, call timeout, or forced refresh. Tick results record the skipped range,
+and the UI marks sparse jumps. The `ticks` argument on step/run is a count of
+scheduler cycles; one cycle may advance across multiple dormant in-sim ticks.
 
 Set `KAMI_API_TOKEN` to require authentication for REST and WebSocket access.
 When it is empty, authentication is disabled for local development. The browser

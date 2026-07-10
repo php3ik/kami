@@ -301,7 +301,7 @@ class Entity(Base):
     simulation_id = Column(String, nullable=False, default="default")
     kind = Column(
         String, nullable=False
-    )  # agent, object, kami, animal, plant, vehicle, document, channel
+    )  # agent, object, kami, kami_transit, animal, plant, vehicle, document, channel
     canonical_name = Column(String, nullable=False)
     archetype = Column(JSON, default=dict)
     created_at_tick = Column(Integer, nullable=False, default=0)
@@ -619,6 +619,39 @@ class Schedule(Base):
     __table_args__ = (
         Index("ix_schedules_tick", "fires_at_tick"),
         Index("ix_schedules_sim_tick", "simulation_id", "fires_at_tick"),
+    )
+
+
+class TransitJourney(Base):
+    """Durable two-phase movement between adjacent kami."""
+
+    __tablename__ = "transit_journeys"
+
+    journey_id = Column(String, primary_key=True)
+    simulation_id = Column(String, nullable=False, default="default")
+    entity_id = Column(String, ForeignKey("entities.entity_id"), nullable=False)
+    from_kami_id = Column(String, ForeignKey("entities.entity_id"), nullable=False)
+    to_kami_id = Column(String, ForeignKey("entities.entity_id"), nullable=False)
+    requested_at_tick = Column(Integer, nullable=False)
+    depart_at_tick = Column(Integer, nullable=False)
+    arrive_at_tick = Column(Integer, nullable=False)
+    status = Column(String, nullable=False, default="scheduled")
+    metadata_ = Column("metadata", JSON, nullable=False, default=dict)
+
+    __table_args__ = (
+        Index(
+            "ix_transit_journeys_sim_status_tick",
+            "simulation_id",
+            "status",
+            "depart_at_tick",
+            "arrive_at_tick",
+        ),
+        Index(
+            "ix_transit_journeys_sim_entity_status",
+            "simulation_id",
+            "entity_id",
+            "status",
+        ),
     )
 
 

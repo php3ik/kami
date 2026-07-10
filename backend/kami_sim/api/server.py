@@ -61,6 +61,7 @@ from ..factstore.models import (
     Schedule,
     SemanticInsight,
     SimulationTick,
+    TransitJourney,
     init_db,
 )
 from ..llm.budget import BudgetExceededError, budget
@@ -74,6 +75,7 @@ from ..simulations import (
 )
 from ..oriv_world import build_oriv_world
 from ..spatial.graph import SpatialGraph
+from ..spatial.transit import get_agent_transit
 from ..world_builder.build_world import build_world, load_world_into_db
 
 logger = logging.getLogger(__name__)
@@ -449,6 +451,35 @@ def _communication_payload(
         reverse=True,
     )
     return {"unread_count": total_unread, "channels": channel_payload}
+
+
+def _transit_payload(
+    session, entity: Entity, at_tick: int | None = None
+) -> dict | None:
+    journey = get_agent_transit(session, entity.entity_id, at_tick=at_tick)
+    if journey is None:
+        return None
+    status = journey.status
+    if at_tick is not None:
+        if at_tick < journey.depart_at_tick:
+            status = "scheduled"
+        elif at_tick < journey.arrive_at_tick:
+            status = "in_transit"
+        else:
+            status = "arrived"
+    origin = session.get(Entity, journey.from_kami_id)
+    destination = session.get(Entity, journey.to_kami_id)
+    return {
+        "journey_id": journey.journey_id,
+        "status": status,
+        "from_kami_id": journey.from_kami_id,
+        "from_name": origin.canonical_name if origin else journey.from_kami_id,
+        "to_kami_id": journey.to_kami_id,
+        "to_name": destination.canonical_name if destination else journey.to_kami_id,
+        "requested_at_tick": journey.requested_at_tick,
+        "depart_at_tick": journey.depart_at_tick,
+        "arrive_at_tick": journey.arrive_at_tick,
+    }
 
 
 def _kami_memory_payload(
@@ -1224,6 +1255,22 @@ def _set_active_simulation(record: dict) -> None:
             simulation_id=record["id"],
         )
         scheduler.current_tick = _next_tick_for_record(session, record)
+        latest_tick = (
+            session.query(SimulationTick)
+            .filter(
+                SimulationTick.simulation_id == record["id"],
+                SimulationTick.status == "committed",
+            )
+            .order_by(SimulationTick.tick.desc())
+            .first()
+        )
+        if latest_tick is not None:
+            scheduler.last_time_mode = (latest_tick.result or {}).get(
+                "time_mode", "dense"
+            )
+            scheduler.last_skipped_ticks = int(
+                (latest_tick.result or {}).get("skipped_ticks", 0)
+            )
     finally:
         session.close()
 
@@ -1419,6 +1466,12 @@ async def get_status():
     runtime = run_manager.snapshot()
     return {
         "current_tick": scheduler.current_tick if scheduler else 0,
+        "sim_time_minutes": (
+            (scheduler.current_tick if scheduler else 0)
+            * config.tick_in_sim_minutes
+        ),
+        "time_mode": scheduler.last_time_mode if scheduler else "dense",
+        "last_skipped_ticks": scheduler.last_skipped_ticks if scheduler else 0,
         "running": runtime["running"],
         "paused": runtime["paused"],
         "operation": runtime["operation"],
@@ -1595,6 +1648,7 @@ async def delete_simulation(simulation_id: str):
             SemanticInsight,
             MemorySummary,
             EpisodicMemoryRecord,
+            TransitJourney,
             MessageDelivery,
             ReadReceipt,
             Message,
@@ -1836,6 +1890,7 @@ async def get_agent(agent_id: str):
         thought_payload = list(reversed(recent_thoughts))
         memory_payload = _agent_memory_payload(session, entity)
         communication_payload = _communication_payload(session, entity)
+        transit_payload = _transit_payload(session, entity)
 
         return {
             "entity_id": entity.entity_id,
@@ -1861,6 +1916,7 @@ async def get_agent(agent_id: str):
             "action_history": action_history,
             "memory": memory_payload,
             "communications": communication_payload,
+            "transit": transit_payload,
             "trace": {
                 "thoughts": thought_payload,
                 "actions": action_history,
@@ -2308,6 +2364,7 @@ async def get_timeline_snapshot(kind: str, entity_id: str, tick: int):
                 "communications": _communication_payload(
                     session, entity, until_tick=tick
                 ),
+                "transit": _transit_payload(session, entity, at_tick=tick),
                 "trace": {
                     "thoughts": recent_thoughts,
                     "actions": action_history,
@@ -2379,7 +2436,6 @@ async def get_all_agents():
             for row in session.query(Location)
             .filter(
                 Location.simulation_id == active_simulation_id,
-                Location.kami_id.in_(kami_ids),
                 Location.valid_until_tick.is_(None),
             )
             .all()
@@ -2417,6 +2473,7 @@ async def get_all_agents():
                 "kami_id": kami_id,
                 "location_name": kami_entity.canonical_name if kami_entity else None,
                 "latest_event": latest_event,
+                "transit": _transit_payload(session, a),
             })
         return results
     finally:

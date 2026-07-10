@@ -8,6 +8,7 @@ import {
   MapPin,
   MessageCircle,
   Network,
+  Route,
   ScrollText,
   Sparkles,
 } from 'lucide-react'
@@ -42,6 +43,8 @@ export default function AgentInspector() {
   const timeline = buildAgentTimeline(agentDetail, tickLog).slice(0, 20)
   const currentLocation = agentDetail.location?.kami_id
   const currentLocationName = getKamiName(currentLocation, kamiLookup)
+  const transit = agentDetail.transit
+  const inTransit = transit?.status === 'in_transit'
   const latest = timeline[0]
   const isError = classifyThought(latest?.thought) === 'error'
 
@@ -70,13 +73,20 @@ export default function AgentInspector() {
               {selectionLoading || agentDetail.loading ? 'Loading' : isError ? 'Needs attention' : 'In character'}
             </span>
           </div>
-          <button
-            onClick={() => currentLocation && selectKami(currentLocation)}
-            className="mt-3 w-full flex items-center gap-2 text-left px-2.5 py-2 rounded bg-blue-950/40 border border-blue-900/70 hover:border-blue-600 transition-colors"
-          >
-            <MapPin size={14} className="text-blue-300" />
-            <span className="text-blue-100 truncate">{currentLocationName}</span>
-          </button>
+          {inTransit ? (
+            <div className="mt-3 w-full flex items-center gap-2 px-2.5 py-2 rounded bg-cyan-950/30 border border-cyan-800/70">
+              <Route size={14} className="shrink-0 text-cyan-300" />
+              <span className="min-w-0 text-cyan-100 break-words">In transit to {transit.to_name}</span>
+            </div>
+          ) : (
+            <button
+              onClick={() => currentLocation && selectKami(currentLocation)}
+              className="mt-3 w-full flex items-center gap-2 text-left px-2.5 py-2 rounded bg-blue-950/40 border border-blue-900/70 hover:border-blue-600 transition-colors"
+            >
+              <MapPin size={14} className="text-blue-300" />
+              <span className="text-blue-100 truncate">{currentLocationName}</span>
+            </button>
+          )}
         </div>
         <div className="flex overflow-x-auto px-2" role="tablist" aria-label="Agent detail views">
           {tabs.map((tab) => (
@@ -138,6 +148,16 @@ function PersonaPane({ arch }: { arch: any }) {
 function MindPane({ detail, arch, latest, isError }: { detail: any; arch: any; latest: any; isError: boolean }) {
   return (
     <div className="space-y-5">
+      {detail.transit && (
+        <section className="border-l-2 border-cyan-600 bg-cyan-950/20 px-3 py-2">
+          <div className="flex items-center gap-2 text-cyan-200">
+            <Route size={14} />
+            <span className="font-semibold capitalize">{String(detail.transit.status).replace('_', ' ')}</span>
+          </div>
+          <div className="mt-1 text-slate-300 break-words">{detail.transit.from_name} to {detail.transit.to_name}</div>
+          <div className="mt-1 text-[11px] text-slate-500 tabular-nums">depart {detail.transit.depart_at_tick} · arrive {detail.transit.arrive_at_tick}</div>
+        </section>
+      )}
       <section className="rounded border border-slate-800 bg-slate-900/60 p-3">
         <SectionTitle icon={<Brain size={15} />} title="Current Signal" />
         <p className={`leading-relaxed ${isError ? 'text-rose-200' : 'text-slate-200'}`}>

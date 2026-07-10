@@ -1,10 +1,10 @@
 import { useSimStore } from '../stores/simStore'
-import { Activity, Clock, Cpu, DollarSign } from 'lucide-react'
+import { Activity, Clock, Cpu, DollarSign, FastForward } from 'lucide-react'
 
 export default function MoodStrip() {
-  const { currentTick, running, paused, totalCostUsd, totalCalls } = useSimStore()
+  const { currentTick, simTimeMinutes, timeMode, lastSkippedTicks, running, paused, totalCostUsd, totalCalls } = useSimStore()
 
-  const simMinutes = currentTick
+  const simMinutes = simTimeMinutes
   const simHours = Math.floor(simMinutes / 60)
   const simMins = simMinutes % 60
   const simDays = Math.floor(simHours / 24)
@@ -20,6 +20,13 @@ export default function MoodStrip() {
             {running ? 'Running' : paused ? 'Paused' : 'Idle'}
           </span>
         </div>
+        {timeMode === 'sparse' && lastSkippedTicks > 0 && (
+          <div className="flex items-center gap-2 px-2.5 py-1 rounded border border-cyan-800 bg-cyan-950/30">
+            <FastForward size={14} className="text-cyan-300" />
+            <span className="text-cyan-200">Sparse</span>
+            <span className="text-white font-semibold tabular-nums">+{lastSkippedTicks}</span>
+          </div>
+        )}
         <div className="flex items-center gap-2 px-2.5 py-1 rounded border border-slate-800 bg-slate-900/80">
           <Clock size={14} className="text-blue-300" />
           <span className="text-slate-400">Tick</span>

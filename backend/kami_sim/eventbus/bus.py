@@ -101,3 +101,22 @@ class EventBus:
         """Remove delivered events for a tick."""
         self._pending.pop(tick, None)
         self._broadcasts.pop(tick, None)
+
+    def next_delivery_tick(
+        self, after_tick: int, min_salience: float = 0.0
+    ) -> int | None:
+        """Return the next propagated event tick that can activate a kami."""
+        candidates = [
+            tick
+            for tick, events in self._pending.items()
+            if tick > after_tick
+            and any(event.salience > min_salience for event in events)
+        ]
+        return min(candidates) if candidates else None
+
+    def cleanup_before(self, tick: int) -> None:
+        """Discard ephemeral deliveries skipped by sparse time advancement."""
+        for queued_tick in [item for item in self._pending if item < tick]:
+            self._pending.pop(queued_tick, None)
+        for queued_tick in [item for item in self._broadcasts if item < tick]:
+            self._broadcasts.pop(queued_tick, None)

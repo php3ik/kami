@@ -13,6 +13,7 @@ from ..eventbus.bus import EventBus
 from ..factstore import tools as fs
 from ..memory.kami_memory import imprint_on_kami
 from ..spatial.graph import SpatialGraph
+from ..spatial.transit import begin_transit
 
 logger = logging.getLogger(__name__)
 
@@ -216,12 +217,26 @@ def _apply_mutation(
         to_kami = mutation["to_kami_id"]
         if spatial_graph:
             to_kami = _resolve_kami_id(session, to_kami, spatial_graph)
-        fs.move_entity(
-            session,
-            entity_id=mutation["entity_id"],
-            to_kami_id=to_kami,
-            tick=tick,
-        )
+        entity = session.get(fs.Entity, mutation["entity_id"])
+        if entity is not None and entity.kind == "agent":
+            if spatial_graph is None:
+                raise ValueError("Agent transit requires a spatial graph")
+            begin_transit(
+                session,
+                entity.entity_id,
+                to_kami,
+                tick,
+                spatial_graph,
+                reason=mutation.get("reason", ""),
+                intent_id=mutation.get("intent_id"),
+            )
+        else:
+            fs.move_entity(
+                session,
+                entity_id=mutation["entity_id"],
+                to_kami_id=to_kami,
+                tick=tick,
+            )
     elif mutation_type == "change_state":
         fs.change_state(
             session,

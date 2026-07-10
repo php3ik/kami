@@ -5,6 +5,9 @@ import { wsClient } from '../api/client'
 interface SimState {
   // Status
   currentTick: number
+  simTimeMinutes: number
+  timeMode: 'dense' | 'sparse'
+  lastSkippedTicks: number
   running: boolean
   paused: boolean
   totalCostUsd: number
@@ -60,6 +63,9 @@ interface SimState {
 
 export const useSimStore = create<SimState>((set, get) => ({
   currentTick: 0,
+  simTimeMinutes: 0,
+  timeMode: 'dense',
+  lastSkippedTicks: 0,
   running: false,
   paused: true,
   totalCostUsd: 0,
@@ -87,6 +93,9 @@ export const useSimStore = create<SimState>((set, get) => ({
     const status = await api.fetchStatus()
     set({
       currentTick: status.current_tick,
+      simTimeMinutes: status.sim_time_minutes ?? status.current_tick,
+      timeMode: status.time_mode === 'sparse' ? 'sparse' : 'dense',
+      lastSkippedTicks: status.last_skipped_ticks ?? 0,
       running: status.running,
       paused: status.paused,
       totalCostUsd: status.budget?.total_cost_usd ?? 0,
@@ -250,10 +259,23 @@ export const useSimStore = create<SimState>((set, get) => ({
   },
 
   addTickResult: (result) => {
-    set((state) => ({
-      tickLog: [...state.tickLog, result],
-      currentTick: result.tick ?? state.currentTick,
-    }))
+    set((state) => {
+      const nextTick = result.next_tick ?? (
+        result.tick !== undefined ? Number(result.tick) + 1 : state.currentTick
+      )
+      return {
+        tickLog: [...state.tickLog, result],
+        currentTick: nextTick,
+        simTimeMinutes: result.sim_time_minutes ?? state.simTimeMinutes,
+        timeMode: result.time_mode === 'sparse' ? 'sparse' : 'dense',
+        lastSkippedTicks: result.skipped_ticks ?? 0,
+        simulations: state.simulations.map((simulation: any) =>
+          simulation.id === state.activeSimulationId
+            ? { ...simulation, current_tick: nextTick, ticks: nextTick }
+            : simulation
+        ),
+      }
+    })
     if (get().viewMode === 'timeline') {
       get().loadTimeline()
     }

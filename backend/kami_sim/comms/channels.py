@@ -399,6 +399,36 @@ def get_forced_wake_agents(
     return agents
 
 
+def get_next_forced_wake_tick(
+    session: Session, simulation_id: str, after_tick: int
+) -> int | None:
+    row = session.query(MessageDelivery).filter(
+        MessageDelivery.simulation_id == simulation_id,
+        MessageDelivery.status == "pending",
+        MessageDelivery.mode == "force_wake",
+        MessageDelivery.available_at_tick > after_tick,
+    ).order_by(MessageDelivery.available_at_tick).first()
+    return row.available_at_tick if row is not None else None
+
+
+def get_next_call_transition_tick(
+    session: Session, simulation_id: str, after_tick: int
+) -> int | None:
+    candidates = []
+    for channel in session.query(Channel).filter(
+        Channel.simulation_id == simulation_id,
+        Channel.kind == "phone_dm",
+    ):
+        metadata = channel.metadata_ or {}
+        if metadata.get("call_state") != "ringing":
+            continue
+        timeout = int(metadata.get("ring_timeout_tick", after_tick))
+        if timeout <= after_tick:
+            return after_tick
+        candidates.append(timeout)
+    return min(candidates) if candidates else None
+
+
 def get_kami_notifications(
     session: Session, kami_id: str, tick: int
 ) -> list[dict]:

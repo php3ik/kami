@@ -404,6 +404,7 @@ class KamiWorker:
                     "entity_id": agent_id,
                     "to_kami_id": target,
                     "reason": "agent intent fallback resolution",
+                    "intent_id": intent.get("intent_id"),
                 })
                 beats.append(f"{agent_name} pushes off toward {target}, turning intention into motion.")
             elif action == "talk":

@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
 
-from ..comms.channels import expire_ringing_calls
+from ..comms.channels import expire_ringing_calls, get_forced_wake_agents
 from ..comms.inbox import process_read
 from ..agent_worker.worker import AgentCognitionWorker
 from ..config import config
@@ -23,9 +23,11 @@ from ..kami_worker.worker import KamiWorker
 from ..llm.budget import budget
 from ..memory import memory_runtime
 from ..spatial.graph import SpatialGraph
+from ..spatial.transit import advance_transit
 from .activity_detector import detect_active_agents, detect_active_kami
 from .conflict_resolver import order_intents_by_initiative
 from .write_committer import publish_staged_broadcasts, stage_proposals
+from .time_step import select_next_tick
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +47,8 @@ class TickScheduler:
         self.event_bus = event_bus or EventBus()
         self.simulation_id = simulation_id
         self.current_tick = 0
+        self.last_time_mode = "dense"
+        self.last_skipped_ticks = 0
         self.tick_log: list[dict] = []
 
     async def run(self, num_ticks: int, start_tick: int | None = None, progress_callback=None) -> list[dict]:
@@ -55,15 +59,48 @@ class TickScheduler:
         run_results: list[dict] = []
 
         for i in range(num_ticks):
-            tick = self.current_tick
+            requested_tick = self.current_tick
+            tick = requested_tick
+            tick_cost_before = 0.0
+            cost_tracking_started = False
             tick_start = time.time()
-            tick_cost_before = budget.get_tick_cost(tick, self.simulation_id)
             tick_succeeded = False
 
             session = self.session_factory()
             try:
+                tick = (
+                    select_next_tick(
+                        session,
+                        self.event_bus,
+                        requested_tick,
+                        self.spatial_graph.all_kami_ids(),
+                        self._simulation_scope(),
+                    )
+                    if isinstance(session, Session)
+                    else requested_tick
+                )
+                skipped_ticks = max(0, tick - requested_tick)
+                time_context = {
+                    "time_mode": "sparse" if skipped_ticks else "dense",
+                    "jumped_from_tick": requested_tick if skipped_ticks else None,
+                    "skipped_ticks": skipped_ticks,
+                    "elapsed_ticks": skipped_ticks + 1,
+                    "next_tick": tick + 1,
+                }
+                tick_cost_before = budget.get_tick_cost(tick, self.simulation_id)
+                cost_tracking_started = True
                 with budget.scope(self.simulation_id):
-                    tick_result = await self._run_tick(session, tick, progress_callback)
+                    if skipped_ticks:
+                        tick_result = await self._run_tick(
+                            session,
+                            tick,
+                            progress_callback,
+                            time_context=time_context,
+                        )
+                    else:
+                        tick_result = await self._run_tick(
+                            session, tick, progress_callback
+                        )
                 tick_result["wall_time_ms"] = int((time.time() - tick_start) * 1000)
                 tick_result["tick_cost_usd"] = round(
                     budget.get_tick_cost(tick, self.simulation_id) - tick_cost_before,
@@ -71,6 +108,8 @@ class TickScheduler:
                 )
                 self.tick_log.append(tick_result)
                 run_results.append(tick_result)
+                self.last_time_mode = tick_result.get("time_mode", "dense")
+                self.last_skipped_ticks = int(tick_result.get("skipped_ticks", 0))
                 tick_succeeded = True
 
                 if (i + 1) % 10 == 0 or i == 0:
@@ -88,13 +127,23 @@ class TickScheduler:
                     "error": str(e),
                     "active_kami_count": 0,
                     "active_agent_count": 0,
-                    "tick_cost_usd": round(
-                        budget.get_tick_cost(tick, self.simulation_id) - tick_cost_before,
-                        6,
+                    "tick_cost_usd": (
+                        round(
+                            budget.get_tick_cost(tick, self.simulation_id)
+                            - tick_cost_before,
+                            6,
+                        )
+                        if cost_tracking_started
+                        else 0.0
                     ),
                     "events": [],
                     "narratives": {},
                     "failed_mutations": [],
+                    "time_mode": "sparse" if tick > requested_tick else "dense",
+                    "jumped_from_tick": requested_tick if tick > requested_tick else None,
+                    "skipped_ticks": max(0, tick - requested_tick),
+                    "elapsed_ticks": max(0, tick - requested_tick) + 1,
+                    "next_tick": tick + 1,
                 }
                 self._record_tick_failure(tick, tick_result)
                 self.tick_log.append(tick_result)
@@ -105,14 +154,21 @@ class TickScheduler:
             if not tick_succeeded:
                 break
 
-            self.current_tick += 1
+            self.current_tick = tick + 1
 
             # Cleanup old event bus data
+            self.event_bus.cleanup_before(tick)
             self.event_bus.cleanup_tick(tick)
 
         return run_results
 
-    async def _run_tick(self, session: Session, tick: int, progress_callback=None) -> dict:
+    async def _run_tick(
+        self,
+        session: Session,
+        tick: int,
+        progress_callback=None,
+        time_context: dict | None = None,
+    ) -> dict:
         """Execute one complete BSP tick."""
         replay = self._committed_tick_result(session, tick)
         if replay is not None:
@@ -121,25 +177,44 @@ class TickScheduler:
         all_kami = self.spatial_graph.all_kami_ids()
 
         expire_ringing_calls(session, self._simulation_scope(), tick)
+        transit_events, transit_transitions = advance_transit(
+            session, self._simulation_scope(), tick
+        )
 
         # === READ PHASE ===
         active_kami = sorted(
-            detect_active_kami(session, self.event_bus, tick, all_kami)
+            detect_active_kami(
+                session,
+                self.event_bus,
+                tick,
+                all_kami,
+                simulation_id=self._simulation_scope(),
+            )
         )
-        agents_by_kami = detect_active_agents(session, active_kami)
+        forced_agents = get_forced_wake_agents(
+            session, self._simulation_scope(), tick
+        )
+        agents_by_kami = detect_active_agents(
+            session, active_kami, forced_agent_ids=forced_agents
+        )
 
         total_agents = sum(len(agents) for agents in agents_by_kami.values())
 
         if not active_kami:
-            result = {
+            result = self._with_time_context({
                 "tick": tick,
                 "active_kami_count": 0,
                 "active_agent_count": 0,
-                "events": [],
+                "events": transit_events,
                 "narratives": {},
                 "failed_mutations": [],
-            }
+                "transit": transit_transitions,
+            }, time_context)
+            staged_memories = memory_runtime.stage_events(
+                session, self._simulation_scope(), transit_events
+            )
             self._commit_tick(session, tick, result)
+            memory_runtime.index_committed(staged_memories)
             await self._consolidate_memory(tick)
             return result
 
@@ -265,8 +340,9 @@ class TickScheduler:
             self.spatial_graph,
             active_kami_ids=set(active_kami),
         )
+        committed_events = [*transit_events, *staged.events]
         staged_memories = memory_runtime.stage_events(
-            session, self._simulation_scope(), staged.events
+            session, self._simulation_scope(), committed_events
         )
 
         # Build tick result
@@ -274,16 +350,17 @@ class TickScheduler:
         for p in proposals:
             narratives[p["kami_id"]] = p.get("narrative", "")
 
-        result = {
+        result = self._with_time_context({
             "tick": tick,
             "active_kami_count": len(active_kami),
             "active_agent_count": total_agents,
             "active_kami": list(active_kami),
-            "events": staged.events,
+            "events": committed_events,
             "failed_mutations": staged.failed_mutations,
             "narratives": narratives,
             "monologues": all_monologues,
-        }
+            "transit": transit_transitions,
+        }, time_context)
         self._commit_tick(session, tick, result)
         memory_runtime.index_committed(staged_memories)
 
@@ -313,6 +390,22 @@ class TickScheduler:
 
     def _simulation_scope(self) -> str:
         return self.simulation_id or "default"
+
+    @staticmethod
+    def _with_time_context(result: dict, time_context: dict | None) -> dict:
+        payload = {
+            **result,
+            "time_mode": "dense",
+            "jumped_from_tick": None,
+            "skipped_ticks": 0,
+            "elapsed_ticks": 1,
+            "next_tick": int(result["tick"]) + 1,
+            **(time_context or {}),
+        }
+        payload["sim_time_minutes"] = (
+            int(payload["next_tick"]) * config.tick_in_sim_minutes
+        )
+        return payload
 
     def _committed_tick_result(self, session: Session, tick: int) -> dict | None:
         record = (

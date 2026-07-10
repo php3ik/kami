@@ -115,6 +115,12 @@ async def test_post_commit_broadcast_failure_does_not_retry_canonical_tick(monke
             entity_id="sim_sim-a__agent_ari",
             simulation_id="sim-a",
         )
+        fs.place_entity(
+            session,
+            "sim_sim-a__agent_ari",
+            "sim_sim-a__kami_room",
+            0,
+        )
         session.commit()
     graph = SpatialGraph()
     graph.add_kami("sim_sim-a__kami_room", name="Room", kind="room")
