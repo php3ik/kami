@@ -3,6 +3,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from kami_sim.api import server
+from kami_sim.simulations import RunConflictError
 
 
 def test_create_request_enforces_population_and_prompt_limits():
@@ -13,7 +14,11 @@ def test_create_request_enforces_population_and_prompt_limits():
 
 
 def test_runtime_guard_rejects_overlapping_commands(monkeypatch):
-    monkeypatch.setitem(server.sim_state, "running", True)
+    class BusyManager:
+        def ensure_idle(self, action):
+            raise RunConflictError(f"Cannot {action} while run simulation is running")
+
+    monkeypatch.setattr(server, "run_manager", BusyManager())
 
     with pytest.raises(HTTPException) as exc_info:
         server._ensure_runtime_idle("step the simulation")

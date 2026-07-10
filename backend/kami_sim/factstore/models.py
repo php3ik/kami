@@ -8,6 +8,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from sqlalchemy import (
+    Boolean,
     JSON,
     Column,
     DateTime,
@@ -25,6 +26,40 @@ from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 class Base(DeclarativeBase):
     pass
+
+
+def _utcnow_naive() -> datetime:
+    return datetime.now(UTC).replace(tzinfo=None)
+
+
+class Simulation(Base):
+    """Persistent simulation metadata and active-world selection."""
+
+    __tablename__ = "simulations"
+
+    id = Column(String, primary_key=True)
+    name = Column(String, nullable=False)
+    prompt = Column(Text, nullable=False, default="")
+    status = Column(String, nullable=False, default="paused")
+    current_tick = Column(Integer, nullable=False, default=0)
+    is_active = Column(Boolean, nullable=False, default=False)
+    graph_data = Column(JSON, nullable=False, default=dict)
+    db_url = Column(String, nullable=True)
+    db_path = Column(String, nullable=True)
+    graph_path = Column(String, nullable=True)
+    total_cost_usd = Column(Float, nullable=False, default=0.0)
+    created_at = Column(DateTime, nullable=False, default=_utcnow_naive)
+    updated_at = Column(
+        DateTime,
+        nullable=False,
+        default=_utcnow_naive,
+        onupdate=_utcnow_naive,
+    )
+
+    __table_args__ = (
+        Index("ix_simulations_active", "is_active"),
+        Index("ix_simulations_updated", "updated_at"),
+    )
 
 
 class Entity(Base):
@@ -216,7 +251,7 @@ class AgentIntentRecord(Base):
     pressure = Column(JSON, default=dict)
     created_at = Column(
         DateTime,
-        default=lambda: datetime.now(UTC).replace(tzinfo=None),
+        default=_utcnow_naive,
     )
 
     __table_args__ = (

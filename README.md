@@ -118,6 +118,19 @@ pip install -e ".[dev]"
 python -m uvicorn kami_sim.api.server:app --host 0.0.0.0 --port 8000
 ```
 
+Apply database migrations before starting the API:
+
+```bash
+cd backend
+alembic upgrade head
+```
+
+The baseline migration detects and adopts a complete pre-Alembic Kami schema.
+Back up an existing SQLite database before the first migration. A partially
+initialized legacy schema is rejected instead of being modified implicitly.
+On first startup, records from `simulations_registry.json` are imported into
+the `simulations` table. The JSON file is not used for subsequent runtime writes.
+
 Backend API:
 
 ```text

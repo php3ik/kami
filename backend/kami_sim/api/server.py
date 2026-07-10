@@ -40,6 +40,11 @@ from ..factstore.models import (
 from ..llm.budget import budget
 from ..llm.client import llm_client
 from ..scheduler.tick_scheduler import TickScheduler
+from ..simulations import (
+    RunConflictError,
+    SimulationRepository,
+    SimulationRunManager,
+)
 from ..oriv_world import build_oriv_world
 from ..spatial.graph import SpatialGraph
 from ..world_builder.build_world import build_world, load_world_into_db
@@ -51,12 +56,10 @@ sim_state: dict[str, Any] = {
     "scheduler": None,
     "session_factory": None,
     "spatial_graph": None,
-    "running": False,
-    "paused": True,
     "active_simulation_id": None,
-    "run_task": None,
+    "simulation_repository": None,
 }
-simulation_run_lock = asyncio.Lock()
+run_manager = SimulationRunManager()
 
 # WebSocket connections
 ws_connections: set[WebSocket] = set()
@@ -80,14 +83,16 @@ def _now_iso() -> str:
 
 
 def _ensure_runtime_idle(action: str) -> None:
-    if sim_state["running"] or simulation_run_lock.locked():
+    try:
+        run_manager.ensure_idle(action)
+    except RunConflictError as exc:
         raise HTTPException(
             status_code=409,
-            detail=f"Cannot {action} while another simulation command is running",
-        )
+            detail=str(exc),
+        ) from exc
 
 
-def _read_registry() -> dict:
+def _read_registry_file() -> dict:
     if not REGISTRY_PATH.exists():
         return {"active_id": None, "simulations": []}
     try:
@@ -96,8 +101,21 @@ def _read_registry() -> dict:
         return {"active_id": None, "simulations": []}
 
 
+def _read_registry() -> dict:
+    repository: SimulationRepository | None = sim_state.get("simulation_repository")
+    if repository is not None:
+        return repository.read_registry()
+    return _read_registry_file()
+
+
 def _write_registry(registry: dict) -> None:
-    REGISTRY_PATH.write_text(json.dumps(registry, indent=2, ensure_ascii=False), encoding="utf-8")
+    repository: SimulationRepository | None = sim_state.get("simulation_repository")
+    if repository is not None:
+        repository.replace_registry(registry)
+        return
+    REGISTRY_PATH.write_text(
+        json.dumps(registry, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
 
 
 def _sqlite_path_from_url(db_url: str) -> Path:
@@ -600,6 +618,11 @@ def _enrich_simulation_record(record: dict) -> dict:
 
 
 def _register_or_update(record: dict, active: bool = False) -> dict:
+    repository: SimulationRepository | None = sim_state.get("simulation_repository")
+    if repository is not None:
+        repository.upsert(record, active=active)
+        return repository.read_registry()
+
     registry = _read_registry()
     sims = registry.get("simulations", [])
     existing = next((idx for idx, item in enumerate(sims) if item["id"] == record["id"]), None)
@@ -615,6 +638,9 @@ def _register_or_update(record: dict, active: bool = False) -> dict:
 
 
 def _active_record() -> dict | None:
+    repository: SimulationRepository | None = sim_state.get("simulation_repository")
+    if repository is not None:
+        return repository.get_active()
     registry = _read_registry()
     active_id = registry.get("active_id")
     return next((item for item in registry.get("simulations", []) if item.get("id") == active_id), None)
@@ -823,16 +849,44 @@ def _set_active_simulation(record: dict) -> None:
     sim_state["session_factory"] = session_factory
     sim_state["spatial_graph"] = spatial_graph
     sim_state["active_simulation_id"] = record["id"]
+    repository: SimulationRepository | None = sim_state.get("simulation_repository")
+    if repository is not None:
+        repository.update_runtime(
+            record["id"],
+            current_tick=scheduler.current_tick,
+            status="paused",
+        )
 
 
-def _update_active_cost(delta: float = 0.0) -> None:
+def _update_active_runtime(
+    *,
+    cost_delta: float = 0.0,
+    current_tick: int | None = None,
+    status: str | None = None,
+) -> None:
     active_id = sim_state.get("active_simulation_id")
     if not active_id:
         return
+    repository: SimulationRepository | None = sim_state.get("simulation_repository")
+    if repository is not None:
+        repository.update_runtime(
+            active_id,
+            current_tick=current_tick,
+            status=status,
+            cost_delta=cost_delta,
+        )
+        return
+
     registry = _read_registry()
     for record in registry.get("simulations", []):
         if record.get("id") == active_id:
-            record["total_cost_usd"] = float(record.get("total_cost_usd", 0.0)) + float(delta)
+            record["total_cost_usd"] = float(record.get("total_cost_usd", 0.0)) + float(
+                cost_delta
+            )
+            if current_tick is not None:
+                record["current_tick"] = current_tick
+            if status is not None:
+                record["status"] = status
             record["updated_at"] = _now_iso()
             break
     _write_registry(registry)
@@ -858,8 +912,14 @@ def _next_tick_for_record(session, record: dict) -> int:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    legacy_registry = _read_registry_file()
     engine, session_factory = init_db(config.database_url)
     sim_state["session_factory"] = session_factory
+    repository = SimulationRepository(session_factory)
+    sim_state["simulation_repository"] = repository
+    imported = repository.import_legacy_registry(legacy_registry)
+    if imported:
+        logger.info("Imported %s simulations from legacy registry", imported)
     session = session_factory()
     try:
         _migrate_legacy_registry_records(session)
@@ -904,6 +964,7 @@ async def lifespan(app: FastAPI):
     logger.info("Simulation initialized")
     yield
     logger.info("Shutting down")
+    await run_manager.shutdown()
     engine.dispose()
 
 
@@ -923,10 +984,12 @@ app.add_middleware(
 async def get_status():
     scheduler: TickScheduler = sim_state["scheduler"]
     active_id = sim_state.get("active_simulation_id")
+    runtime = run_manager.snapshot()
     return {
         "current_tick": scheduler.current_tick if scheduler else 0,
-        "running": sim_state["running"],
-        "paused": sim_state["paused"],
+        "running": runtime["running"],
+        "paused": runtime["paused"],
+        "operation": runtime["operation"],
         "budget": budget.get_summary(active_id),
         "active_simulation_id": active_id,
     }
@@ -988,7 +1051,9 @@ async def list_simulations():
 @app.post("/api/simulations/{simulation_id}/switch")
 async def switch_simulation(simulation_id: str):
     _ensure_runtime_idle("switch simulations")
-    async with simulation_run_lock:
+    async with run_manager.command(
+        "switch simulations", simulation_id, running=False
+    ):
         registry = _read_registry()
         record = next(
             (
@@ -1001,7 +1066,6 @@ async def switch_simulation(simulation_id: str):
         if not record:
             raise HTTPException(status_code=404, detail="Simulation not found")
 
-        sim_state["paused"] = True
         record["updated_at"] = _now_iso()
         _register_or_update(record, active=True)
         _set_active_simulation(record)
@@ -1622,7 +1686,11 @@ async def _run_scheduler_ticks(scheduler: TickScheduler, ticks: int) -> list[dic
         await _broadcast(msg)
 
     results = await scheduler.run(num_ticks=ticks, progress_callback=_progress)
-    _update_active_cost(sum(float(result.get("tick_cost_usd", 0.0)) for result in results))
+    _update_active_runtime(
+        cost_delta=sum(float(result.get("tick_cost_usd", 0.0)) for result in results),
+        current_tick=scheduler.current_tick,
+        status="running",
+    )
     for result in results:
         await _broadcast({"type": "tick", "data": result})
     return results
@@ -1636,14 +1704,13 @@ async def step_tick(ticks: int = Query(1, ge=1, le=100)):
         raise HTTPException(status_code=503, detail="Simulation is not initialized")
 
     _ensure_runtime_idle("step the simulation")
-    sim_state["running"] = True
-    sim_state["paused"] = False
-    try:
-        async with simulation_run_lock:
-            results = await _run_scheduler_ticks(scheduler, ticks)
-    finally:
-        sim_state["running"] = False
-        sim_state["paused"] = True
+    async with run_manager.command(
+        "step simulation",
+        sim_state.get("active_simulation_id"),
+        running=True,
+    ):
+        results = await _run_scheduler_ticks(scheduler, ticks)
+    _update_active_runtime(current_tick=scheduler.current_tick, status="paused")
 
     return {"ticks_run": len(results), "results": results}
 
@@ -1656,9 +1723,8 @@ class CreateSimRequest(BaseModel):
 @app.post("/api/sim/create")
 async def create_sim(request: CreateSimRequest):
     _ensure_runtime_idle("create a simulation")
-    async with simulation_run_lock:
-        sim_state["paused"] = True
-        sim_id = uuid.uuid4().hex[:10]
+    sim_id = uuid.uuid4().hex[:10]
+    async with run_manager.command("create simulation", sim_id, running=False):
         logger.info("Generating world %s with %s agents", sim_id, request.agent_count)
         try:
             with budget.scope(sim_id):
@@ -1713,36 +1779,36 @@ async def start_run(ticks: int = Query(100, ge=1, le=10_000)):
         raise HTTPException(status_code=503, detail="Simulation is not initialized")
 
     _ensure_runtime_idle("start the simulation")
-    sim_state["paused"] = False
-    sim_state["running"] = True
 
-    async def run_loop():
-        try:
-            async with simulation_run_lock:
-                for _ in range(ticks):
-                    if sim_state["paused"]:
-                        break
-                    results = await _run_scheduler_ticks(scheduler, 1)
-                    if results and results[0].get("error"):
-                        break
-        except Exception as exc:
-            logger.error("Background simulation run failed", exc_info=True)
-            await _broadcast({
-                "type": "run_error",
-                "data": {"error": str(exc)},
-            })
-        finally:
-            sim_state["running"] = False
-            sim_state["paused"] = True
-            sim_state["run_task"] = None
+    async def run_one_tick() -> list[dict]:
+        return await _run_scheduler_ticks(scheduler, 1)
 
-    sim_state["run_task"] = asyncio.create_task(run_loop())
+    async def report_error(exc: Exception) -> None:
+        logger.error(
+            "Background simulation run failed: %s",
+            exc,
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
+        await _broadcast({"type": "run_error", "data": {"error": str(exc)}})
+
+    async def mark_complete() -> None:
+        _update_active_runtime(current_tick=scheduler.current_tick, status="paused")
+
+    _update_active_runtime(current_tick=scheduler.current_tick, status="running")
+    run_manager.start_background(
+        "run simulation",
+        sim_state["active_simulation_id"],
+        ticks,
+        run_one_tick,
+        report_error,
+        mark_complete,
+    )
     return {"status": "started", "target_ticks": ticks}
 
 
 @app.post("/api/sim/pause")
 async def pause():
-    sim_state["paused"] = True
+    run_manager.pause()
     return {"status": "paused"}
 
 
@@ -1755,7 +1821,6 @@ async def websocket_endpoint(websocket: WebSocket):
             data = await websocket.receive_text()
             msg = json.loads(data)
             if msg.get("type") == "step":
-                owns_run = False
                 try:
                     if not sim_state["scheduler"]:
                         raise HTTPException(
@@ -1763,17 +1828,14 @@ async def websocket_endpoint(websocket: WebSocket):
                             detail="Simulation is not initialized",
                         )
                     _ensure_runtime_idle("step the simulation")
-                    owns_run = True
-                    sim_state["running"] = True
-                    sim_state["paused"] = False
-                    async with simulation_run_lock:
+                    async with run_manager.command(
+                        "step simulation",
+                        sim_state.get("active_simulation_id"),
+                        running=True,
+                    ):
                         await _run_scheduler_ticks(sim_state["scheduler"], 1)
                 except HTTPException as exc:
                     await websocket.send_json({"type": "error", "detail": exc.detail})
-                finally:
-                    if owns_run:
-                        sim_state["running"] = False
-                        sim_state["paused"] = True
     except WebSocketDisconnect:
         pass
     finally:
