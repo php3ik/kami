@@ -5,9 +5,6 @@ Four recipient states: active_attention, ambient_awareness, dormant, forced_wake
 
 from __future__ import annotations
 
-from typing import Any
-
-
 def determine_delivery_mode(
     agent_id: str,
     kami_is_active: bool,
@@ -29,6 +26,6 @@ def determine_delivery_mode(
         else:
             return "ambient"
     else:
-        if message_salience > 0.8:
+        if message_salience >= 0.8:
             return "force_wake"
         return "dormant"

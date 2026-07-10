@@ -11,6 +11,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from ..comms.inbox import get_feed_digest, get_inbox_digest
 from ..factstore import tools as fs
 from ..factstore.models import Entity
 from ..llm.client import llm_client
@@ -57,11 +58,23 @@ class AgentCognitionWorker:
                 name = kami_entity.canonical_name if kami_entity else nid
                 destinations.append({"kami_id": nid, "name": name})
 
+        inbox = get_inbox_digest(self.session, agent_id, current_tick=tick)
+        recent_intents = fs.get_recent_intents(
+            self.session, agent_id=agent_id, limit=6
+        )
+        checked_feed = any(
+            intent.action_type == "check_feed" and intent.tick == tick - 1
+            for intent in recent_intents
+        )
+        feed = get_feed_digest(self.session, agent_id, tick) if checked_feed else []
+
         # Build prompt
         system_blocks, messages = build_agent_prompt(
             self.session, agent_entity, kami_id, kami_state, tick,
             recent_personal_events,
             available_destinations=destinations,
+            pending_communications=inbox,
+            feed_posts=feed,
         )
 
         # Call LLM (always cheap tier for agent cognition)
@@ -81,7 +94,11 @@ class AgentCognitionWorker:
             return self._fallback(agent_id, reason=str(e))
 
         # Parse response
-        return self._parse_response(response, agent_id, agent_entity)
+        result = self._parse_response(response, agent_id, agent_entity)
+        result["processed_message_ids"] = [
+            item["message_id"] for item in [*inbox, *feed]
+        ]
+        return result
 
     def _parse_response(self, response: dict, agent_id: str, agent_entity: Entity) -> dict:
         inner_monologue = response.get("content", "")
@@ -172,5 +189,6 @@ class AgentCognitionWorker:
                 "salience": 0.1,
             }],
             "beliefs": [],
+            "processed_message_ids": [],
             "inner_monologue": inner_monologue,
         }

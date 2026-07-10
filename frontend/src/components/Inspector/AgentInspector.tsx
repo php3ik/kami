@@ -6,6 +6,7 @@ import {
   HeartPulse,
   Lightbulb,
   MapPin,
+  MessageCircle,
   Network,
   ScrollText,
   Sparkles,
@@ -14,12 +15,13 @@ import { useSimStore } from '../../stores/simStore'
 import { buildAgentTimeline, classifyThought, digest, getKamiName, makeKamiLookup } from '../../utils/simView'
 import EntityReferenceText from './EntityReferenceText'
 
-type AgentTab = 'persona' | 'mind' | 'memory' | 'social' | 'trace'
+type AgentTab = 'persona' | 'mind' | 'memory' | 'messages' | 'social' | 'trace'
 
 const tabs: Array<{ id: AgentTab; label: string }> = [
   { id: 'persona', label: 'Persona' },
   { id: 'mind', label: 'Mind' },
   { id: 'memory', label: 'Memory' },
+  { id: 'messages', label: 'Messages' },
   { id: 'social', label: 'Social' },
   { id: 'trace', label: 'Trace' },
 ]
@@ -99,6 +101,7 @@ export default function AgentInspector() {
         {activeTab === 'persona' && <PersonaPane arch={arch} />}
         {activeTab === 'mind' && <MindPane detail={agentDetail} arch={arch} latest={latest} isError={isError} />}
         {activeTab === 'memory' && <MemoryPane memory={agentDetail.memory || {}} />}
+        {activeTab === 'messages' && <MessagesPane communications={agentDetail.communications || {}} agentId={agentDetail.entity_id} />}
         {activeTab === 'social' && <SocialPane detail={agentDetail} />}
         {activeTab === 'trace' && <TracePane timeline={timeline} />}
       </div>
@@ -257,6 +260,73 @@ function SocialPane({ detail }: { detail: any }) {
       </div>
     </section>
   ) : <EmptyState text="No recorded relations." />
+}
+
+function MessagesPane({ communications, agentId }: { communications: any; agentId: string }) {
+  const channels = communications.channels || []
+  if (!channels.length) return <EmptyState text="No communication channels." />
+  return (
+    <div className="space-y-5">
+      <div className="flex items-center justify-between gap-3">
+        <SectionTitle icon={<MessageCircle size={15} />} title="Communications" />
+        <span className="text-xs tabular-nums text-slate-500">
+          {communications.unread_count || 0} unread
+        </span>
+      </div>
+      {channels.map((channel: any) => {
+        const contacts = (channel.participants || [])
+          .filter((participant: any) => participant.entity_id !== agentId)
+          .map((participant: any) => participant.name)
+          .join(', ')
+        return (
+          <section key={channel.channel_id} className="border-t border-slate-800 pt-4 first:border-t-0 first:pt-0">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <h4 className="font-semibold text-slate-100 break-words">{contacts || channel.kind}</h4>
+                <div className="mt-1 text-[11px] text-slate-500 break-all">{channel.channel_id}</div>
+              </div>
+              <div className="shrink-0 text-right text-[11px]">
+                <div className="text-cyan-300">{channel.kind}</div>
+                {channel.unread_count > 0 && <div className="mt-1 text-amber-300">{channel.unread_count} unread</div>}
+                {channel.call_state && <div className="mt-1 text-emerald-300">call {channel.call_state}</div>}
+              </div>
+            </div>
+            <div className="mt-3 space-y-2">
+              {(channel.messages || []).length > 0 ? channel.messages.map((message: any) => {
+                const outgoing = message.sender_id === agentId
+                const unread = !outgoing && !message.read_at_tick
+                return (
+                  <div
+                    key={message.message_id}
+                    className={`border-l-2 px-3 py-2 ${
+                      unread
+                        ? 'border-amber-500 bg-amber-950/20'
+                        : outgoing
+                          ? 'border-blue-700 bg-blue-950/20'
+                          : 'border-slate-700 bg-slate-900/50'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2 text-[11px]">
+                      <span className={outgoing ? 'text-blue-300' : 'text-slate-300'}>
+                        {outgoing ? 'You' : message.sender_name}
+                      </span>
+                      <span className="shrink-0 tabular-nums text-slate-500">Tick {message.sent_at_tick}</span>
+                    </div>
+                    <p className="mt-1 whitespace-pre-wrap break-words text-slate-200 leading-relaxed">{message.content}</p>
+                    <div className="mt-1 flex flex-wrap gap-x-3 text-[10px] text-slate-600">
+                      {message.kind !== 'message' && <span>{message.kind}</span>}
+                      {message.delivery_mode && <span>{message.delivery_mode}</span>}
+                      {message.read_at_tick !== null && message.read_at_tick !== undefined && <span>read tick {message.read_at_tick}</span>}
+                    </div>
+                  </div>
+                )
+              }) : <div className="text-xs text-slate-600">No messages yet.</div>}
+            </div>
+          </section>
+        )
+      })}
+    </div>
+  )
 }
 
 function TracePane({ timeline }: { timeline: any[] }) {

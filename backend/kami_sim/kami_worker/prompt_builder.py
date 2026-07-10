@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from ..comms.channels import get_kami_notifications
 from ..eventbus.bus import EventBus
 from ..factstore.models import Entity
 from ..factstore.tools import get_active_conversations, get_events, query_kami_state
@@ -167,6 +168,49 @@ KAMI_TOOLS = [
             "required": ["fact"],
         },
     },
+    {
+        "name": "emit_message",
+        "description": "Validate and emit a remote message requested by an agent intent.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "channel_id": {"type": "string"},
+                "sender_id": {"type": "string"},
+                "content": {"type": "string"},
+                "salience": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                "intent_id": {"type": "string"},
+            },
+            "required": ["channel_id", "sender_id", "content"],
+        },
+    },
+    {
+        "name": "initiate_call",
+        "description": "Start a phone call requested by an agent intent.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sender_id": {"type": "string"},
+                "recipient_id": {"type": "string"},
+                "channel_id": {"type": "string"},
+                "intent_id": {"type": "string"},
+            },
+            "required": ["sender_id", "recipient_id"],
+        },
+    },
+    {
+        "name": "update_call_state",
+        "description": "Answer, decline, or end an existing phone call.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "channel_id": {"type": "string"},
+                "agent_id": {"type": "string"},
+                "state": {"type": "string", "enum": ["active", "declined", "ended"]},
+                "intent_id": {"type": "string"},
+            },
+            "required": ["channel_id", "agent_id", "state"],
+        },
+    },
 ]
 
 
@@ -215,6 +259,9 @@ def build_kami_prompt(
     # 8. Pending external events
     pending = event_bus.get_pending_events(tick, kami_id)
     pending_block = _format_pending_events(pending)
+    notification_block = _format_notifications(
+        get_kami_notifications(session, kami_id, tick)
+    )
 
     # Build system blocks with caching
     system_blocks = [
@@ -251,6 +298,9 @@ def build_kami_prompt(
 
 ### Pending External Events
 {pending_block or "None."}
+
+### Device Notifications In This Place
+{notification_block or "None."}
 
 ### Adjacent Locations (valid targets for move_entity — use EXACT kami IDs)
 {adjacent_block}
@@ -376,3 +426,11 @@ def _format_pending_events(pending: list) -> str:
     for evt in pending:
         lines.append(f"- [{evt.event_type}] from {evt.source_kami_id}: {evt.narrative_digest} (salience={evt.salience:.2f})")
     return "\n".join(lines)
+
+
+def _format_notifications(notifications: list[dict]) -> str:
+    return "\n".join(
+        f"- {item['description']} for {item['recipient_id']} "
+        f"(salience={item['salience']:.2f}, message_id={item['message_id']})"
+        for item in notifications
+    )

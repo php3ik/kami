@@ -12,6 +12,8 @@ from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
 
+from ..comms.channels import expire_ringing_calls
+from ..comms.inbox import process_read
 from ..agent_worker.worker import AgentCognitionWorker
 from ..config import config
 from ..eventbus.bus import EventBus
@@ -118,6 +120,8 @@ class TickScheduler:
 
         all_kami = self.spatial_graph.all_kami_ids()
 
+        expire_ringing_calls(session, self._simulation_scope(), tick)
+
         # === READ PHASE ===
         active_kami = sorted(
             detect_active_kami(session, self.event_bus, tick, all_kami)
@@ -212,6 +216,13 @@ class TickScheduler:
             all_intents[kami_id].extend(enriched_intents)
             all_monologues[agent_id] = result.get("inner_monologue", "")
 
+            process_read(
+                session,
+                agent_id,
+                result.get("processed_message_ids", []),
+                tick,
+            )
+
             # Apply belief updates
             for belief in result.get("beliefs", []):
                 try:
@@ -248,7 +259,11 @@ class TickScheduler:
 
         # === WRITE PHASE ===
         staged = stage_proposals(
-            session, tick, proposals, self.spatial_graph,
+            session,
+            tick,
+            proposals,
+            self.spatial_graph,
+            active_kami_ids=set(active_kami),
         )
         staged_memories = memory_runtime.stage_events(
             session, self._simulation_scope(), staged.events

@@ -16,6 +16,7 @@ from kami_sim.factstore.models import (
     SimulationTick,
     init_db,
 )
+from kami_sim.comms.channels import create_channel, send_message
 from kami_sim.simulations import RunConflictError
 
 
@@ -37,6 +38,22 @@ def test_runtime_guard_rejects_overlapping_commands(monkeypatch):
         server._ensure_runtime_idle("step the simulation")
 
     assert exc_info.value.status_code == 409
+
+
+def test_legacy_migration_ignores_record_without_database_path():
+    engine, factory = init_db("sqlite:///:memory:")
+    record = {
+        "id": "incomplete",
+        "name": "Incomplete import",
+        "db_url": "sqlite:///missing.db",
+        "db_path": None,
+        "graph_data": {},
+    }
+    try:
+        with factory() as session:
+            assert server._migrate_legacy_file_record(record, session) == record
+    finally:
+        engine.dispose()
 
 
 def test_openapi_exposes_bounded_tick_parameters():
@@ -183,5 +200,35 @@ def test_memory_api_payloads_are_scoped_and_structured():
         assert kami_payload["summaries"][0]["summary_id"] == "ksum_a"
         assert kami_payload["imprints"][0]["imprint_id"] == "kimp_a"
         assert "repaired radio" in kami_payload["long_term_memory"]
+    finally:
+        engine.dispose()
+
+
+def test_communication_api_payload_is_scoped_and_time_bounded():
+    engine, factory = init_db("sqlite:///:memory:")
+    try:
+        with factory() as session:
+            ari = fs.create_entity(
+                session, "agent", "Ari", 0, entity_id="agent_ari"
+            )
+            ben = fs.create_entity(
+                session, "agent", "Ben", 0, entity_id="agent_ben"
+            )
+            channel = create_channel(
+                session, "sms", [ari.entity_id, ben.entity_id], 0
+            )
+            send_message(
+                session, channel.channel_id, ari.entity_id, "First", 1
+            )
+            send_message(
+                session, channel.channel_id, ari.entity_id, "Future", 5
+            )
+            session.commit()
+
+            payload = server._communication_payload(session, ben, until_tick=2)
+
+        assert payload["unread_count"] == 1
+        assert [message["content"] for message in payload["channels"][0]["messages"]] == ["First"]
+        assert payload["channels"][0]["messages"][0]["available_at_tick"] == 2
     finally:
         engine.dispose()

@@ -11,6 +11,7 @@ The core idea is to separate subjective cognition from objective reality. Agents
 - Atomic tick commits with durable idempotency records, failed-attempt recovery, and restart-safe clock restoration.
 - Persistent, simulation-isolated agent memory with episodic recall, daily summaries, semantic insights, and life narratives.
 - Durable Kami memory with daily place histories, bounded prompt context, and permanent high-salience imprints.
+- Durable non-local communications with direct/group channels, delayed delivery, cognition-time read receipts, phone-call wake triggers, pull-based social feeds, and group rate limits.
 - Multi-provider LLM routing for Anthropic, OpenAI, and Gemini, with cheap/strong model tiers.
 - In-app settings panel for LLM provider, model names, API tokens, and image-generation model settings.
 - Tick-based simulation with agent cognition, Kami scene resolution, state mutation, event logging, and WebSocket updates.
@@ -151,6 +152,11 @@ Canonical Kami events are consolidated once per in-sim day into spatial
 history. Events with salience `>=0.9`, or events carrying an explicit
 `payload.imprint`, become permanent place facts and remain visible in the Kami
 prompt and inspector.
+Messages follow a one-tick causality delay and are exposed to an agent only when
+their delivery is available. Successful cognition creates the read receipt in
+the same atomic tick transaction. High-salience messages and ringing calls can
+wake remote recipients, while public posts remain pull-based. The agent
+inspector exposes channel history, unread state, delivery mode, and call state.
 
 Set `KAMI_API_TOKEN` to require authentication for REST and WebSocket access.
 When it is empty, authentication is disabled for local development. The browser
@@ -173,6 +179,12 @@ Useful endpoints:
 - `PUT /api/settings/llm`
 - `GET /api/simulations/{simulation_id}/budget`
 - `PUT /api/simulations/{simulation_id}/budget`
+- `GET /api/channels?agent_id={agent_id}`
+- `POST /api/channels`
+- `GET /api/channels/{channel_id}/messages`
+- `POST /api/channels/{channel_id}/messages`
+- `POST /api/calls`
+- `PUT /api/channels/{channel_id}/call`
 - `POST /api/world-map/generate`
 - `GET /api/entity/{entity_id}`
 

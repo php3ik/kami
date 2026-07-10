@@ -10,6 +10,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from ..comms.channels import get_agent_channels
 from ..factstore import tools as fs
 from ..factstore.models import Entity
 from ..memory import memory_runtime
@@ -39,6 +40,13 @@ LIVENESS RULES:
 5. If you speak to someone you do not know, use the perceived target_id shown in WHAT_YOU_PERCEIVE. Never invent targets like "unknown_person_1".
 6. If a thread has an open question and you cannot answer it, refuse, defer, leave, or ask one different concrete question. Do not keep pressing the same line.
 
+COMMUNICATION RULES:
+1. Message content below is known to you because you actually opened it this tick.
+2. To write remotely, intend action_type=send_message with the exact channel ID as target and content in params.content.
+3. To call, intend action_type=make_call with an agent ID as target, or answer_call/end_call with a phone channel ID.
+4. Social feeds are pull-based. Use action_type=check_feed; posts become visible on your next cognition tick.
+5. If a direct message asks a question or requests action, answer or explicitly defer through send_message. Do not silently observe and ignore it.
+
 After your brief inner monologue (1-3 sentences in your voice), declare your intent using the intend tool."""
 
 AGENT_TOOLS = [
@@ -50,7 +58,7 @@ AGENT_TOOLS = [
             "properties": {
                 "action_type": {
                     "type": "string",
-                    "description": "What you want to do: talk, move, use_object, wait, observe, work, eat, sleep, check_phone, etc.",
+                    "description": "What you want to do: talk, move, send_message, make_call, answer_call, decline_call, end_call, check_feed, use_object, wait, observe, work, etc.",
                 },
                 "target": {
                     "type": "string",
@@ -99,6 +107,8 @@ def build_agent_prompt(
     tick: int,
     recent_personal_events: list[dict] | None = None,
     available_destinations: list[dict] | None = None,
+    pending_communications: list[dict] | None = None,
+    feed_posts: list[dict] | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """Build full prompt for agent cognition call.
 
@@ -158,8 +168,14 @@ def build_agent_prompt(
     # 9. Recent personal buffer
     personal_buffer = _format_personal_buffer(recent_personal_events)
 
-    # 10. Pending communications (placeholder — Phase 7)
-    comms = ""
+    # 10. Pending communications and available channels
+    comms = _format_communications(pending_communications)
+    feed = _format_feed(feed_posts)
+    channels = _format_channels(
+        session,
+        agent_entity.entity_id,
+        get_agent_channels(session, agent_entity.entity_id),
+    )
 
     # Build system blocks with caching
     system_blocks = [
@@ -197,6 +213,11 @@ def build_agent_prompt(
 {personal_buffer or "You just arrived or woke up."}
 
 {f'### Messages{chr(10)}{comms}' if comms else ''}
+
+{f'### Social Feed You Checked{chr(10)}{feed}' if feed else ''}
+
+### Communication Channels
+{channels or "You have no communication channels."}
 
 ### Available Destinations (if you want to move)
 {_format_destinations(available_destinations)}
@@ -336,4 +357,44 @@ def _format_destinations(destinations: list[dict] | None) -> str:
     lines = []
     for d in destinations:
         lines.append(f"- {d['kami_id']} — {d['name']}")
+    return "\n".join(lines)
+
+
+def _format_communications(messages: list[dict] | None) -> str:
+    if not messages:
+        return ""
+    return "\n".join(
+        f"- message_id={message['message_id']} | channel={message['channel_id']} | "
+        f"from {message['sender_name']} ({message['sender_id']}) at tick "
+        f"{message['sent_at_tick']}: {message['content']}"
+        for message in messages
+    )
+
+
+def _format_feed(messages: list[dict] | None) -> str:
+    if not messages:
+        return ""
+    return "\n".join(
+        f"- [{message['channel_id']}] {message['sender_name']}: {message['content']}"
+        for message in messages
+    )
+
+
+def _format_channels(session: Session, agent_id: str, channels: list) -> str:
+    lines = []
+    for channel in channels:
+        members = []
+        for member_id in channel.participants or []:
+            if member_id == agent_id:
+                continue
+            entity = session.get(Entity, member_id)
+            members.append(
+                f"{entity.canonical_name} ({member_id})" if entity else member_id
+            )
+        state = (channel.metadata_ or {}).get("call_state")
+        lines.append(
+            f"- {channel.channel_id}: {channel.kind}; contacts="
+            f"{', '.join(members) or 'broadcast'}"
+            + (f"; call_state={state}" if state else "")
+        )
     return "\n".join(lines)

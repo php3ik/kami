@@ -249,6 +249,65 @@ export class SimWebSocket {
   }
 }
 
+export async function fetchChannels(agentId?: string) {
+  const query = agentId ? `?agent_id=${encodeURIComponent(agentId)}` : ''
+  const res = await apiFetch(`${API_BASE}/channels${query}`)
+  return parseResponse(res)
+}
+
+export async function createChannel(payload: {
+  kind: string
+  participants: string[]
+  subscribers?: string[]
+  medium_properties?: Record<string, unknown>
+  metadata?: Record<string, unknown>
+}) {
+  const res = await apiFetch(`${API_BASE}/channels`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  return parseResponse(res)
+}
+
+export async function sendChannelMessage(channelId: string, payload: {
+  sender_id: string
+  content: string
+  salience?: number
+}) {
+  const res = await apiFetch(`${API_BASE}/channels/${encodeURIComponent(channelId)}/messages`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  return parseResponse(res)
+}
+
+export async function startCall(payload: {
+  sender_id: string
+  recipient_id: string
+  channel_id?: string
+}) {
+  const res = await apiFetch(`${API_BASE}/calls`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  return parseResponse(res)
+}
+
+export async function updateCall(channelId: string, payload: {
+  agent_id: string
+  state: 'active' | 'declined' | 'ended'
+}) {
+  const res = await apiFetch(`${API_BASE}/channels/${encodeURIComponent(channelId)}/call`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  return parseResponse(res)
+}
+
 function encodeToken(token: string) {
   const bytes = new TextEncoder().encode(token)
   let binary = ''

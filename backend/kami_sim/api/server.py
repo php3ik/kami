@@ -25,6 +25,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func
 
+from ..comms.channels import (
+    create_channel,
+    get_agent_channels,
+    get_channel_messages,
+    make_call,
+    read_message,
+    send_message,
+    update_call_state,
+)
 from ..config import config
 from ..factstore import tools as fs
 from ..factstore.models import (
@@ -43,6 +52,7 @@ from ..factstore.models import (
     Location,
     LLMCall,
     Message,
+    MessageDelivery,
     MemorySummary,
     Ownership,
     PhysicalState,
@@ -338,6 +348,107 @@ def _agent_memory_payload(
         ),
         "last_narrative_tick": profile.last_narrative_tick if profile else None,
     }
+
+
+def _communication_payload(
+    session, entity: Entity, until_tick: int | None = None
+) -> dict:
+    """Serialize only channels the agent participates in or subscribes to."""
+    channels = get_agent_channels(session, entity.entity_id)
+    receipt_query = session.query(ReadReceipt).filter(
+        ReadReceipt.simulation_id == entity.simulation_id,
+        ReadReceipt.agent_id == entity.entity_id,
+    )
+    if until_tick is not None:
+        receipt_query = receipt_query.filter(ReadReceipt.read_at_tick <= until_tick)
+    receipts = {
+        row.message_id: row
+        for row in receipt_query
+    }
+    deliveries = {
+        row.message_id: row
+        for row in session.query(MessageDelivery).filter(
+            MessageDelivery.simulation_id == entity.simulation_id,
+            MessageDelivery.recipient_id == entity.entity_id,
+        )
+    }
+    members = {
+        member_id: session.get(Entity, member_id)
+        for channel in channels
+        for member_id in set(channel.participants or []) | set(channel.subscribers or [])
+    }
+    channel_payload = []
+    total_unread = 0
+    for channel in channels:
+        messages = get_channel_messages(
+            session, channel.channel_id, limit=50, until_tick=until_tick
+        )
+        message_payload = []
+        unread_count = 0
+        for message in messages:
+            receipt = receipts.get(message.message_id)
+            delivery = deliveries.get(message.message_id)
+            available = (
+                delivery is None
+                or until_tick is None
+                or delivery.available_at_tick <= until_tick
+            )
+            is_unread = (
+                message.sender_id != entity.entity_id
+                and receipt is None
+                and available
+            )
+            if is_unread:
+                unread_count += 1
+            sender = members.get(message.sender_id) or session.get(
+                Entity, message.sender_id
+            )
+            message_payload.append({
+                "message_id": message.message_id,
+                "sender_id": message.sender_id,
+                "sender_name": sender.canonical_name if sender else message.sender_id,
+                "content": message.content,
+                "kind": message.kind,
+                "sent_at_tick": message.sent_at_tick,
+                "salience": float(message.salience),
+                "read_at_tick": receipt.read_at_tick if receipt else None,
+                "delivery_mode": delivery.mode if delivery else None,
+                "delivery_status": (
+                    "read" if receipt else "pending" if delivery else None
+                ),
+                "available_at_tick": delivery.available_at_tick if delivery else None,
+            })
+        total_unread += unread_count
+        channel_payload.append({
+            "channel_id": channel.channel_id,
+            "kind": channel.kind,
+            "participants": [
+                {
+                    "entity_id": member_id,
+                    "name": members[member_id].canonical_name if members.get(member_id) else member_id,
+                }
+                for member_id in channel.participants or []
+            ],
+            "subscribers": list(channel.subscribers or []),
+            "medium_properties": dict(channel.medium_properties or {}),
+            "call_state": (
+                (channel.metadata_ or {}).get("call_state")
+                if until_tick is None
+                or int((channel.metadata_ or {}).get("updated_at_tick", (channel.metadata_ or {}).get("started_at_tick", -1))) <= until_tick
+                else None
+            ),
+            "created_at_tick": channel.created_at_tick,
+            "unread_count": unread_count,
+            "messages": message_payload,
+        })
+    channel_payload.sort(
+        key=lambda channel: (
+            channel["messages"][-1]["sent_at_tick"] if channel["messages"] else -1,
+            channel["channel_id"],
+        ),
+        reverse=True,
+    )
+    return {"unread_count": total_unread, "channels": channel_payload}
 
 
 def _kami_memory_payload(
@@ -870,8 +981,14 @@ def _migrate_legacy_file_record(record: dict, main_session) -> dict:
     if record.get("graph_data"):
         return record
     db_url = record.get("db_url")
-    db_path = Path(record.get("db_path", ""))
-    if not db_url or db_url == config.database_url or not db_path.exists():
+    db_path_value = record.get("db_path")
+    db_path = Path(db_path_value) if db_path_value else None
+    if (
+        not db_url
+        or db_url == config.database_url
+        or db_path is None
+        or not db_path.exists()
+    ):
         return record
 
     sim_id = record["id"]
@@ -1364,6 +1481,31 @@ class LLMSettingsRequest(BaseModel):
     strong_image_model: str | None = None
 
 
+class ChannelCreateRequest(BaseModel):
+    kind: str
+    participants: list[str] = Field(min_length=1, max_length=100)
+    subscribers: list[str] | None = Field(default=None, max_length=500)
+    medium_properties: dict = Field(default_factory=dict)
+    metadata: dict = Field(default_factory=dict)
+
+
+class MessageSendRequest(BaseModel):
+    sender_id: str
+    content: str = Field(min_length=1, max_length=4000)
+    salience: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
+class CallStartRequest(BaseModel):
+    sender_id: str
+    recipient_id: str
+    channel_id: str | None = None
+
+
+class CallStateRequest(BaseModel):
+    agent_id: str
+    state: str
+
+
 @app.get("/api/settings/llm")
 async def get_llm_settings():
     return config.llm_settings()
@@ -1453,6 +1595,7 @@ async def delete_simulation(simulation_id: str):
             SemanticInsight,
             MemorySummary,
             EpisodicMemoryRecord,
+            MessageDelivery,
             ReadReceipt,
             Message,
             Channel,
@@ -1692,6 +1835,7 @@ async def get_agent(agent_id: str):
         action_history = action_history[:20]
         thought_payload = list(reversed(recent_thoughts))
         memory_payload = _agent_memory_payload(session, entity)
+        communication_payload = _communication_payload(session, entity)
 
         return {
             "entity_id": entity.entity_id,
@@ -1716,6 +1860,7 @@ async def get_agent(agent_id: str):
             "recent_thoughts": thought_payload,
             "action_history": action_history,
             "memory": memory_payload,
+            "communications": communication_payload,
             "trace": {
                 "thoughts": thought_payload,
                 "actions": action_history,
@@ -1727,8 +1872,182 @@ async def get_agent(agent_id: str):
                     }
                     for belief in beliefs
                 ],
+                "messages": [
+                    message
+                    for channel in communication_payload["channels"]
+                    for message in channel["messages"]
+                ][-50:],
             },
         }
+    finally:
+        session.close()
+
+
+def _api_tick() -> int:
+    scheduler: TickScheduler | None = sim_state.get("scheduler")
+    return int(scheduler.current_tick if scheduler else 0)
+
+
+def _channel_summary(channel: Channel) -> dict:
+    return {
+        "channel_id": channel.channel_id,
+        "kind": channel.kind,
+        "participants": list(channel.participants or []),
+        "subscribers": list(channel.subscribers or []),
+        "medium_properties": dict(channel.medium_properties or {}),
+        "metadata": dict(channel.metadata_ or {}),
+        "created_at_tick": channel.created_at_tick,
+    }
+
+
+@app.get("/api/channels")
+async def list_channels(agent_id: str | None = None):
+    session = sim_state["session_factory"]()
+    try:
+        if agent_id:
+            entity = _require_active_entity(session.get(Entity, agent_id), agent_id)
+            if entity.kind != "agent":
+                raise HTTPException(status_code=404, detail="Agent not found")
+            return _communication_payload(session, entity)
+        channels = session.query(Channel).filter(
+            Channel.simulation_id == _active_simulation_id()
+        ).order_by(Channel.created_at_tick.desc()).all()
+        return {"channels": [_channel_summary(channel) for channel in channels]}
+    finally:
+        session.close()
+
+
+@app.post("/api/channels")
+async def api_create_channel(request: ChannelCreateRequest):
+    _ensure_runtime_idle("create a communication channel")
+    session = sim_state["session_factory"]()
+    try:
+        channel = create_channel(
+            session,
+            request.kind,
+            request.participants,
+            _api_tick(),
+            medium_properties=request.medium_properties,
+            metadata=request.metadata,
+            subscribers=request.subscribers,
+        )
+        if channel.simulation_id != _active_simulation_id():
+            raise ValueError("Channel members are not in the active simulation")
+        session.commit()
+        return _channel_summary(channel)
+    except ValueError as exc:
+        session.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    finally:
+        session.close()
+
+
+@app.get("/api/channels/{channel_id}/messages")
+async def list_channel_messages(
+    channel_id: str, limit: int = Query(100, ge=1, le=500)
+):
+    session = sim_state["session_factory"]()
+    try:
+        channel = session.get(Channel, channel_id)
+        if channel is None or channel.simulation_id != _active_simulation_id():
+            raise HTTPException(status_code=404, detail="Channel not found")
+        return {
+            "channel": _channel_summary(channel),
+            "messages": [
+                {
+                    "message_id": message.message_id,
+                    "sender_id": message.sender_id,
+                    "content": message.content,
+                    "kind": message.kind,
+                    "sent_at_tick": message.sent_at_tick,
+                    "salience": float(message.salience),
+                    "metadata": dict(message.metadata_ or {}),
+                }
+                for message in get_channel_messages(session, channel_id, limit=limit)
+            ],
+        }
+    finally:
+        session.close()
+
+
+@app.post("/api/channels/{channel_id}/messages")
+async def api_send_message(channel_id: str, request: MessageSendRequest):
+    _ensure_runtime_idle("send a communication message")
+    session = sim_state["session_factory"]()
+    try:
+        message = send_message(
+            session,
+            channel_id,
+            request.sender_id,
+            request.content,
+            _api_tick(),
+            request.salience,
+        )
+        if message.simulation_id != _active_simulation_id():
+            raise ValueError("Channel is not in the active simulation")
+        session.commit()
+        return {"message_id": message.message_id, "available_at_tick": message.sent_at_tick + 1}
+    except ValueError as exc:
+        session.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    finally:
+        session.close()
+
+
+@app.post("/api/calls")
+async def api_start_call(request: CallStartRequest):
+    _ensure_runtime_idle("start a phone call")
+    session = sim_state["session_factory"]()
+    try:
+        channel, message = make_call(
+            session,
+            request.sender_id,
+            request.recipient_id,
+            _api_tick(),
+            channel_id=request.channel_id,
+        )
+        if channel.simulation_id != _active_simulation_id():
+            raise ValueError("Call participants are not in the active simulation")
+        session.commit()
+        return {"channel": _channel_summary(channel), "message_id": message.message_id}
+    except ValueError as exc:
+        session.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    finally:
+        session.close()
+
+
+@app.put("/api/channels/{channel_id}/call")
+async def api_update_call(channel_id: str, request: CallStateRequest):
+    _ensure_runtime_idle("update a phone call")
+    session = sim_state["session_factory"]()
+    try:
+        channel = update_call_state(
+            session, channel_id, request.agent_id, request.state, _api_tick()
+        )
+        if channel.simulation_id != _active_simulation_id():
+            raise ValueError("Call is not in the active simulation")
+        session.commit()
+        return _channel_summary(channel)
+    except ValueError as exc:
+        session.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    finally:
+        session.close()
+
+
+@app.post("/api/messages/{message_id}/read")
+async def api_read_message(message_id: str, agent_id: str):
+    _ensure_runtime_idle("mark a communication message read")
+    session = sim_state["session_factory"]()
+    try:
+        entity = _require_active_entity(session.get(Entity, agent_id), agent_id)
+        receipt = read_message(session, message_id, entity.entity_id, _api_tick())
+        session.commit()
+        return {"message_id": message_id, "read_at_tick": receipt.read_at_tick}
+    except ValueError as exc:
+        session.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     finally:
         session.close()
 
@@ -1985,6 +2304,9 @@ async def get_timeline_snapshot(kind: str, entity_id: str, tick: int):
                 "action_history": action_history,
                 "memory": _agent_memory_payload(
                     session, entity, until_tick=tick, include_semantic=False
+                ),
+                "communications": _communication_payload(
+                    session, entity, until_tick=tick
                 ),
                 "trace": {
                     "thoughts": recent_thoughts,

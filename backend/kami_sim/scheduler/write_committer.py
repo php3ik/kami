@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 
 from sqlalchemy.orm import Session
 
+from ..comms.channels import make_call, send_message, update_call_state
 from ..eventbus.bus import EventBus
 from ..factstore import tools as fs
 from ..memory.kami_memory import imprint_on_kami
@@ -54,6 +55,7 @@ def stage_proposals(
     tick: int,
     proposals: list[dict],
     spatial_graph: SpatialGraph,
+    active_kami_ids: set[str] | None = None,
 ) -> StagedProposals:
     """Apply accepted scenes without committing or publishing side effects."""
     _ensure_physical_transaction(session)
@@ -68,7 +70,13 @@ def stage_proposals(
             with session.begin_nested():
                 for mutation in proposal.get("mutations", []):
                     try:
-                        _apply_mutation(session, tick, mutation, spatial_graph)
+                        _apply_mutation(
+                            session,
+                            tick,
+                            mutation,
+                            spatial_graph,
+                            active_kami_ids=active_kami_ids,
+                        )
                     except Exception as exc:
                         staged.failed_mutations.append({
                             "mutation": mutation,
@@ -199,6 +207,7 @@ def _apply_mutation(
     tick: int,
     mutation: dict,
     spatial_graph: SpatialGraph | None = None,
+    active_kami_ids: set[str] | None = None,
 ) -> None:
     """Apply one validated mutation to FactStore."""
     mutation_type = mutation["type"]
@@ -292,6 +301,36 @@ def _apply_mutation(
             importance=mutation.get("importance", 0.9),
             category=mutation.get("category", "event"),
             source_event_id=f"tool:{tick}:{source_digest}",
+        )
+    elif mutation_type == "emit_message":
+        send_message(
+            session,
+            mutation["channel_id"],
+            mutation["sender_id"],
+            mutation["content"],
+            tick,
+            salience=mutation.get("salience", 0.5),
+            kind=mutation.get("message_kind", "message"),
+            metadata={"intent_id": mutation.get("intent_id")},
+            active_kami_ids=active_kami_ids,
+        )
+    elif mutation_type == "make_call":
+        make_call(
+            session,
+            mutation["sender_id"],
+            mutation["recipient_id"],
+            tick,
+            channel_id=mutation.get("channel_id"),
+            salience=mutation.get("salience", 0.95),
+            active_kami_ids=active_kami_ids,
+        )
+    elif mutation_type == "update_call_state":
+        update_call_state(
+            session,
+            mutation["channel_id"],
+            mutation["agent_id"],
+            mutation["state"],
+            tick,
         )
     else:
         raise ValueError(f"Unknown mutation type: {mutation_type}")

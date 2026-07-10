@@ -6,6 +6,7 @@ from collections.abc import Collection
 
 from sqlalchemy.orm import Session
 
+from ..comms.channels import get_forced_wake_agents
 from ..config import config
 from ..eventbus.bus import EventBus
 from ..factstore import tools as fs
@@ -27,8 +28,16 @@ def detect_active_kami(
         schedule.kami_id
         for schedule in fs.get_due_schedules(session, tick, simulation_id)
     }
+    forced_wake_kami = set()
+    for agent_id in get_forced_wake_agents(session, simulation_id, tick):
+        location = fs.get_current_location(session, agent_id)
+        if location is not None:
+            forced_wake_kami.add(location.kami_id)
 
     for kami_id in all_kami_ids:
+        if kami_id in forced_wake_kami:
+            active.add(kami_id)
+            continue
         # (a) Kami with at least one agent inside
         agents = fs.get_agents_in_kami(session, kami_id)
         if agents:

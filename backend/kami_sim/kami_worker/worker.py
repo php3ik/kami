@@ -90,12 +90,14 @@ class KamiWorker:
         except Exception as e:
             logger.error(f"LLM call failed for kami {kami_id} tick {tick}: {e}")
             result = self._fallback_result(kami_id, tick, agent_intents)
+            self._append_comms_intents(result, agent_intents)
             return apply_scene_guardrails(
                 result, scene_dynamics, kami_id, tick, agent_intents
             )
 
         # Parse tool calls into propose-list
         result = self._parse_response(response, kami_id, tick, agent_intents)
+        self._append_comms_intents(result, agent_intents)
         return apply_scene_guardrails(
             result, scene_dynamics, kami_id, tick, agent_intents
         )
@@ -212,6 +214,31 @@ class KamiWorker:
                 if "delta" in inp:
                     mutation["delta"] = inp["delta"]
                 mutations.append(mutation)
+            elif name == "emit_message":
+                mutations.append({
+                    "type": "emit_message",
+                    "channel_id": inp["channel_id"],
+                    "sender_id": inp["sender_id"],
+                    "content": inp["content"],
+                    "salience": inp.get("salience", 0.5),
+                    "intent_id": inp.get("intent_id"),
+                })
+            elif name == "initiate_call":
+                mutations.append({
+                    "type": "make_call",
+                    "sender_id": inp["sender_id"],
+                    "recipient_id": inp["recipient_id"],
+                    "channel_id": inp.get("channel_id"),
+                    "intent_id": inp.get("intent_id"),
+                })
+            elif name == "update_call_state":
+                mutations.append({
+                    "type": "update_call_state",
+                    "channel_id": inp["channel_id"],
+                    "agent_id": inp["agent_id"],
+                    "state": inp["state"],
+                    "intent_id": inp.get("intent_id"),
+                })
 
         # If no emit_event was called, add a fallback idle event
         if not events:
@@ -223,6 +250,76 @@ class KamiWorker:
             "broadcasts": broadcasts,
             "narrative": narrative,
         }
+
+    def _append_comms_intents(self, result: dict, intents: list[dict]) -> None:
+        """Guarantee that valid communication intents reach the committer."""
+        mutations = result.setdefault("mutations", [])
+        handled = {
+            mutation.get("intent_id")
+            for mutation in mutations
+            if mutation.get("type") in {"emit_message", "make_call", "update_call_state"}
+        }
+        handled_messages = {
+            (mutation.get("sender_id"), mutation.get("channel_id"))
+            for mutation in mutations
+            if mutation.get("type") == "emit_message"
+        }
+        handled_calls = {
+            (mutation.get("sender_id"), mutation.get("recipient_id"))
+            for mutation in mutations
+            if mutation.get("type") == "make_call"
+        }
+        handled_call_updates = {
+            (mutation.get("agent_id"), mutation.get("channel_id"), mutation.get("state"))
+            for mutation in mutations
+            if mutation.get("type") == "update_call_state"
+        }
+        for intent in intents:
+            intent_id = intent.get("intent_id")
+            if intent_id and intent_id in handled:
+                continue
+            action = intent.get("action_type")
+            params = intent.get("params") or {}
+            if action == "send_message":
+                channel_id = intent.get("target") or params.get("channel_id")
+                if (intent.get("agent_id"), channel_id) in handled_messages:
+                    continue
+                mutations.append({
+                    "type": "emit_message",
+                    "channel_id": channel_id,
+                    "sender_id": intent.get("agent_id"),
+                    "content": params.get("content") or intent.get("utterance") or "",
+                    "salience": intent.get("salience", 0.5),
+                    "intent_id": intent_id,
+                })
+            elif action == "make_call":
+                recipient_id = intent.get("target") or params.get("recipient_id")
+                if (intent.get("agent_id"), recipient_id) in handled_calls:
+                    continue
+                mutations.append({
+                    "type": "make_call",
+                    "sender_id": intent.get("agent_id"),
+                    "recipient_id": recipient_id,
+                    "channel_id": params.get("channel_id"),
+                    "salience": intent.get("salience", 0.95),
+                    "intent_id": intent_id,
+                })
+            elif action in {"answer_call", "decline_call", "end_call"}:
+                channel_id = intent.get("target") or params.get("channel_id")
+                state = {
+                    "answer_call": "active",
+                    "decline_call": "declined",
+                    "end_call": "ended",
+                }[action]
+                if (intent.get("agent_id"), channel_id, state) in handled_call_updates:
+                    continue
+                mutations.append({
+                    "type": "update_call_state",
+                    "channel_id": channel_id,
+                    "agent_id": intent.get("agent_id"),
+                    "state": state,
+                    "intent_id": intent_id,
+                })
 
     def _clean_narrative(self, narrative: str) -> str:
         text = (narrative or "").strip()

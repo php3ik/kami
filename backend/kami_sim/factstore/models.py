@@ -653,6 +653,8 @@ class Message(Base):
     content = Column(Text, nullable=False)
     sent_at_tick = Column(Integer, nullable=False)
     salience = Column(Float, default=0.5)
+    kind = Column(String, nullable=False, default="message")
+    metadata_ = Column("metadata", JSON, nullable=False, default=dict)
 
     __table_args__ = (
         Index("ix_messages_channel_tick", "channel_id", "sent_at_tick"),
@@ -679,6 +681,34 @@ class ReadReceipt(Base):
     __table_args__ = (
         UniqueConstraint("message_id", "agent_id", name="uq_read_receipt"),
         Index("ix_receipts_sim_agent", "simulation_id", "agent_id"),
+    )
+
+
+class MessageDelivery(Base):
+    """Per-recipient delivery state for direct messages and calls."""
+
+    __tablename__ = "message_deliveries"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    simulation_id = Column(String, nullable=False, default="default")
+    message_id = Column(String, ForeignKey("messages.message_id"), nullable=False)
+    recipient_id = Column(String, ForeignKey("entities.entity_id"), nullable=False)
+    mode = Column(String, nullable=False, default="dormant")
+    status = Column(String, nullable=False, default="pending")
+    available_at_tick = Column(Integer, nullable=False)
+    created_at_tick = Column(Integer, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "message_id", "recipient_id", name="uq_message_delivery_recipient"
+        ),
+        Index(
+            "ix_message_deliveries_sim_recipient_status",
+            "simulation_id",
+            "recipient_id",
+            "status",
+            "available_at_tick",
+        ),
     )
 
 
