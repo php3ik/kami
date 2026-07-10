@@ -49,6 +49,7 @@ class SimulationRepository:
             "created_at": simulation.created_at.replace(tzinfo=UTC).isoformat(),
             "updated_at": simulation.updated_at.replace(tzinfo=UTC).isoformat(),
             "total_cost_usd": float(simulation.total_cost_usd or 0.0),
+            "budget_limit_usd": simulation.budget_limit_usd,
         }
 
     def read_registry(self) -> dict:
@@ -140,6 +141,26 @@ class SimulationRepository:
         finally:
             session.close()
 
+    def update_budget_limit(
+        self, simulation_id: str, budget_limit_usd: float | None
+    ) -> dict:
+        session = self.session_factory()
+        try:
+            simulation = session.get(Simulation, simulation_id)
+            if simulation is None:
+                raise KeyError(f"Simulation not found: {simulation_id}")
+            if budget_limit_usd is not None and budget_limit_usd < 0:
+                raise ValueError("Budget limit cannot be negative")
+            simulation.budget_limit_usd = budget_limit_usd
+            simulation.updated_at = _utcnow_naive()
+            session.commit()
+            return self.to_record(simulation)
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
     def replace_registry(self, registry: dict) -> None:
         session = self.session_factory()
         try:
@@ -217,6 +238,11 @@ class SimulationRepository:
         simulation.db_path = record.get("db_path")
         simulation.graph_path = record.get("graph_path")
         simulation.total_cost_usd = float(record.get("total_cost_usd") or 0.0)
+        if "budget_limit_usd" in record:
+            raw_limit = record.get("budget_limit_usd")
+            simulation.budget_limit_usd = (
+                None if raw_limit is None else max(0.0, float(raw_limit))
+            )
         simulation.created_at = _parse_datetime(
             record.get("created_at"), simulation.created_at
         )

@@ -89,6 +89,20 @@ def test_update_runtime_persists_tick_status_and_cost_delta():
         engine.dispose()
 
 
+def test_update_budget_limit_supports_override_and_default_inheritance():
+    engine, repository = _repository()
+    try:
+        repository.upsert(_record("sim-a", "A"))
+
+        updated = repository.update_budget_limit("sim-a", 2.5)
+        assert updated["budget_limit_usd"] == 2.5
+
+        inherited = repository.update_budget_limit("sim-a", None)
+        assert inherited["budget_limit_usd"] is None
+    finally:
+        engine.dispose()
+
+
 def test_legacy_import_enriches_migration_placeholder():
     engine, repository = _repository()
     try:

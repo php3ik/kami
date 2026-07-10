@@ -23,6 +23,16 @@ def _csv_env(name: str, default: str) -> tuple[str, ...]:
     )
 
 
+def _non_negative_float_env(name: str, default: str = "0") -> float:
+    try:
+        value = float(os.getenv(name, default))
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a number") from exc
+    if value < 0:
+        raise ValueError(f"{name} cannot be negative")
+    return value
+
+
 @dataclass
 class SimConfig:
     # Time
@@ -50,6 +60,9 @@ class SimConfig:
 
     # Safety
     entity_creation_quota_per_kami_per_tick: int = 3
+    simulation_budget_usd: float = field(
+        default_factory=lambda: _non_negative_float_env("SIMULATION_BUDGET_USD")
+    )
 
     # Caching
     prompt_cache_enabled: bool = True

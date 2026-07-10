@@ -61,34 +61,92 @@ class LLMClient:
         Returns dict with 'content', 'tool_calls', 'usage'.
         """
         provider, model = self._get_model(tier)
-
-        if provider == "anthropic":
-            result = await self._call_anthropic(
-                model, messages, system, tools, response_format, max_tokens, temperature, component
-            )
-        elif provider == "openai":
-            result = await self._call_openai(
-                model, messages, system, tools, response_format, max_tokens, temperature, component
-            )
-        elif provider == "gemini":
-            result = await self._call_gemini(
-                model, messages, system, tools, max_tokens, temperature, component
-            )
-        else:
-            raise ValueError(
-                f"Unknown LLM provider: {provider}. Use anthropic, openai, or gemini."
-            )
-
-        usage = result["usage"]
-        budget.record_call(
-            model=f"{provider}:{model}",
-            component=component,
-            input_tokens=usage.get("input_tokens", 0),
-            output_tokens=usage.get("output_tokens", 0),
-            cache_read_tokens=usage.get("cache_read", 0),
-            cache_write_tokens=usage.get("cache_write", 0),
-            tick=tick,
+        qualified_model = f"{provider}:{model}"
+        payload_bytes = len(
+            json.dumps(
+                {
+                    "messages": messages,
+                    "system": system,
+                    "tools": tools,
+                    "response_format": response_format,
+                },
+                ensure_ascii=False,
+                default=str,
+            ).encode("utf-8")
         )
+        reservation_id = budget.reserve_call(
+            qualified_model,
+            # One token cannot encode less than one payload byte. The fixed
+            # allowance covers provider-added message framing.
+            max_input_tokens=payload_bytes + 1024,
+            max_output_tokens=max_tokens,
+        )
+
+        try:
+            if provider == "anthropic":
+                result = await self._call_anthropic(
+                    model,
+                    messages,
+                    system,
+                    tools,
+                    response_format,
+                    max_tokens,
+                    temperature,
+                    component,
+                )
+            elif provider == "openai":
+                result = await self._call_openai(
+                    model,
+                    messages,
+                    system,
+                    tools,
+                    response_format,
+                    max_tokens,
+                    temperature,
+                    component,
+                )
+            elif provider == "gemini":
+                result = await self._call_gemini(
+                    model,
+                    messages,
+                    system,
+                    tools,
+                    max_tokens,
+                    temperature,
+                    component,
+                )
+            else:
+                raise ValueError(
+                    f"Unknown LLM provider: {provider}. Use anthropic, openai, or gemini."
+                )
+        except Exception as exc:
+            try:
+                budget.record_failure(
+                    model=qualified_model,
+                    component=component,
+                    error=exc,
+                    tick=tick,
+                    reservation_id=reservation_id,
+                )
+            except Exception:
+                logger.exception("Failed to persist LLM failure accounting")
+            raise
+
+        try:
+            usage = result["usage"]
+            budget.record_call(
+                model=qualified_model,
+                component=component,
+                input_tokens=usage.get("input_tokens", 0),
+                output_tokens=usage.get("output_tokens", 0),
+                cache_read_tokens=usage.get("cache_read", 0),
+                cache_write_tokens=usage.get("cache_write", 0),
+                tick=tick,
+                reservation_id=reservation_id,
+            )
+        except Exception:
+            budget.release_reservation(reservation_id)
+            raise
 
         return result
 

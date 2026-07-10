@@ -34,6 +34,7 @@ from ..factstore.models import (
     Entity,
     Event,
     Location,
+    LLMCall,
     Message,
     Ownership,
     PhysicalState,
@@ -42,7 +43,7 @@ from ..factstore.models import (
     Schedule,
     init_db,
 )
-from ..llm.budget import budget
+from ..llm.budget import BudgetExceededError, budget
 from ..llm.client import llm_client
 from ..scheduler.tick_scheduler import TickScheduler
 from ..simulations import (
@@ -1002,6 +1003,7 @@ async def lifespan(app: FastAPI):
     legacy_registry = _read_registry_file()
     engine, session_factory = init_db(config.database_url)
     sim_state["session_factory"] = session_factory
+    budget.configure(session_factory, config.simulation_budget_usd)
     repository = SimulationRepository(session_factory)
     sim_state["simulation_repository"] = repository
     imported = repository.import_legacy_registry(legacy_registry)
@@ -1053,6 +1055,7 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down")
     await run_manager.shutdown()
     engine.dispose()
+    budget.configure(None, config.simulation_budget_usd)
 
 
 app = FastAPI(title="Kami Simulation", lifespan=lifespan)
@@ -1079,6 +1082,48 @@ async def get_status():
         "operation": runtime["operation"],
         "budget": budget.get_summary(active_id),
         "active_simulation_id": active_id,
+    }
+
+
+class SimulationBudgetRequest(BaseModel):
+    budget_limit_usd: float | None = Field(default=None, ge=0)
+
+
+@app.get("/api/simulations/{simulation_id}/budget")
+async def get_simulation_budget(
+    simulation_id: str,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    repository: SimulationRepository = sim_state["simulation_repository"]
+    if repository is None or repository.get(simulation_id) is None:
+        raise HTTPException(status_code=404, detail="Simulation not found")
+    return {
+        "simulation_id": simulation_id,
+        "summary": budget.get_summary(simulation_id),
+        "calls": budget.list_calls(simulation_id, limit=limit, offset=offset),
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@app.put("/api/simulations/{simulation_id}/budget")
+async def update_simulation_budget(
+    simulation_id: str, request: SimulationBudgetRequest
+):
+    _ensure_runtime_idle("update a simulation budget")
+    repository: SimulationRepository = sim_state["simulation_repository"]
+    if repository is None:
+        raise HTTPException(status_code=503, detail="Simulation repository unavailable")
+    try:
+        simulation = repository.update_budget_limit(
+            simulation_id, request.budget_limit_usd
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Simulation not found") from exc
+    return {
+        "simulation": _enrich_simulation_record(simulation),
+        "budget": budget.get_summary(simulation_id),
     }
 
 
@@ -1174,6 +1219,7 @@ async def delete_simulation(simulation_id: str):
     session = sim_state["session_factory"]()
     try:
         scoped_models = (
+            LLMCall,
             ReadReceipt,
             Message,
             Channel,
@@ -1833,7 +1879,6 @@ async def _run_scheduler_ticks(scheduler: TickScheduler, ticks: int) -> list[dic
 
     results = await scheduler.run(num_ticks=ticks, progress_callback=_progress)
     _update_active_runtime(
-        cost_delta=sum(float(result.get("tick_cost_usd", 0.0)) for result in results),
         current_tick=scheduler.current_tick,
         status="running",
     )
@@ -1871,6 +1916,23 @@ async def create_sim(request: CreateSimRequest):
     _ensure_runtime_idle("create a simulation")
     sim_id = uuid.uuid4().hex[:10]
     async with run_manager.command("create simulation", sim_id, running=False):
+        db_url = config.database_url
+        created_at = _now_iso()
+        record = {
+            "id": sim_id,
+            "name": request.name
+            or (request.prompt[:48] + ("..." if len(request.prompt) > 48 else "")),
+            "prompt": request.prompt,
+            "status": "building",
+            "db_url": db_url,
+            "db_path": str(_sqlite_path_from_url(db_url)),
+            "graph_path": None,
+            "graph_data": {},
+            "created_at": created_at,
+            "updated_at": created_at,
+            "total_cost_usd": 0.0,
+        }
+        _register_or_update(record, active=False)
         logger.info("Generating world %s with %s agents", sim_id, request.agent_count)
         try:
             with budget.scope(sim_id):
@@ -1879,37 +1941,32 @@ async def create_sim(request: CreateSimRequest):
                     agent_count=request.agent_count,
                     name=request.name,
                 )
+            session_factory = sim_state["session_factory"]
+            session = session_factory()
+            try:
+                spatial_graph = load_world_into_db(
+                    session, world_output, simulation_id=sim_id
+                )
+            finally:
+                session.close()
+        except BudgetExceededError as exc:
+            sim_state["simulation_repository"].update_runtime(sim_id, status="failed")
+            raise HTTPException(status_code=402, detail=str(exc)) from exc
         except Exception as exc:
+            sim_state["simulation_repository"].update_runtime(sim_id, status="failed")
             logger.error("World generation failed", exc_info=True)
             raise HTTPException(
                 status_code=422,
                 detail=f"World generation failed: {exc}",
             ) from exc
 
-        db_url = config.database_url
-        session_factory = sim_state["session_factory"]
-        session = session_factory()
-        try:
-            spatial_graph = load_world_into_db(
-                session, world_output, simulation_id=sim_id
-            )
-        finally:
-            session.close()
         graph_data = spatial_graph.to_dict()
-
-        record = {
-            "id": sim_id,
-            "name": request.name
-            or (request.prompt[:48] + ("..." if len(request.prompt) > 48 else "")),
-            "prompt": request.prompt,
-            "db_url": db_url,
-            "db_path": str(_sqlite_path_from_url(db_url)),
-            "graph_path": None,
-            "graph_data": graph_data,
-            "created_at": _now_iso(),
-            "updated_at": _now_iso(),
-            "total_cost_usd": budget.get_summary(sim_id)["total_cost_usd"],
-        }
+        record.update(
+            status="paused",
+            graph_data=graph_data,
+            updated_at=_now_iso(),
+            total_cost_usd=budget.get_summary(sim_id)["total_cost_usd"],
+        )
         _register_or_update(record, active=True)
         _set_active_simulation(record)
         await _broadcast({"type": "simulation_switched", "data": {"id": sim_id}})

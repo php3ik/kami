@@ -5,6 +5,7 @@ import pytest
 
 from kami_sim.api import server
 from kami_sim.factstore import tools as fs
+from kami_sim.llm.budget import BudgetExceededError, budget
 
 
 @pytest.mark.asyncio
@@ -77,6 +78,46 @@ async def test_lifespan_imports_legacy_registry_into_database(tmp_path, monkeypa
             assert (
                 await client.get("/api/entity/sim_other__hidden")
             ).status_code == 404
+
+            with budget.scope("legacy-sim"):
+                budget.record_call(
+                    "anthropic:claude-haiku-4-5-20251001",
+                    "AgentWorker",
+                    1000,
+                    200,
+                    tick=2,
+                )
+            budget_response = await client.get(
+                "/api/simulations/legacy-sim/budget"
+            )
+            assert budget_response.status_code == 200
+            assert budget_response.json()["summary"]["total_calls"] == 1
+            assert len(budget_response.json()["calls"]) == 1
+
+            limit_response = await client.put(
+                "/api/simulations/legacy-sim/budget",
+                json={"budget_limit_usd": 2.0},
+            )
+            assert limit_response.status_code == 200
+            assert limit_response.json()["budget"]["budget_limit_usd"] == 2.0
+
+            async def reject_world(*args, **kwargs):
+                raise BudgetExceededError("new-sim", 0.01, 0.02)
+
+            monkeypatch.setattr(server, "build_world", reject_world)
+            create_response = await client.post(
+                "/api/sim/create",
+                json={"prompt": "A world that exceeds its cap", "agent_count": 2},
+            )
+            assert create_response.status_code == 402
+            failed_records = [
+                item
+                for item in server.sim_state["simulation_repository"]
+                .read_registry()["simulations"]
+                if item["id"] != "legacy-sim"
+            ]
+            assert len(failed_records) == 1
+            assert failed_records[0]["status"] == "failed"
 
     # The file is import-only; runtime writes are persisted in the database.
     assert json.loads(registry_path.read_text(encoding="utf-8"))["active_id"] == "legacy-sim"

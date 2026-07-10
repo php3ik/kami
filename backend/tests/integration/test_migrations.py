@@ -36,7 +36,12 @@ def test_migrations_build_fresh_schema_without_drift(tmp_path):
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             )
         }
-    assert {"entities", "events", "simulations", "alembic_version"} <= tables
+    assert {"entities", "events", "simulations", "llm_calls", "alembic_version"} <= tables
+    with sqlite3.connect(database_path) as database:
+        simulation_columns = {
+            row[1] for row in database.execute("PRAGMA table_info(simulations)")
+        }
+    assert "budget_limit_usd" in simulation_columns
 
 
 def test_migrations_adopt_complete_create_all_schema(tmp_path):

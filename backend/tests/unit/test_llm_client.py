@@ -1,4 +1,9 @@
+import pytest
+
 from kami_sim.config import config
+from kami_sim.factstore.models import LLMCall, init_db
+from kami_sim.llm import client as client_module
+from kami_sim.llm.budget import BudgetTracker
 from kami_sim.llm.client import LLMClient
 
 
@@ -60,3 +65,71 @@ def test_anthropic_tool_schema_converts_to_gemini_function_declaration():
 
     assert converted.name == "intend"
     assert converted.description == "Declare an intent."
+
+
+@pytest.mark.asyncio
+async def test_call_reserves_and_persists_provider_usage(monkeypatch):
+    engine, factory = init_db("sqlite:///:memory:")
+    tracker = BudgetTracker()
+    tracker.configure(factory)
+    monkeypatch.setattr(client_module, "budget", tracker)
+    monkeypatch.setattr(config, "llm_provider", "openai")
+    monkeypatch.setattr(config, "cheap_model_name", "gpt-test")
+    client = LLMClient()
+
+    async def fake_call(*args, **kwargs):
+        return {
+            "content": "ok",
+            "tool_calls": [],
+            "usage": {"input_tokens": 12, "output_tokens": 4},
+        }
+
+    monkeypatch.setattr(client, "_call_openai", fake_call)
+    try:
+        with tracker.scope("sim-a"):
+            result = await client.call(
+                [{"role": "user", "content": "hello"}],
+                component="AgentWorker",
+                tick=7,
+                max_tokens=16,
+            )
+
+        assert result["content"] == "ok"
+        with factory() as session:
+            call = session.query(LLMCall).one()
+        assert call.simulation_id == "sim-a"
+        assert call.provider == "openai"
+        assert call.tick == 7
+        assert call.status == "completed"
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_call_persists_provider_failure(monkeypatch):
+    engine, factory = init_db("sqlite:///:memory:")
+    tracker = BudgetTracker()
+    tracker.configure(factory)
+    monkeypatch.setattr(client_module, "budget", tracker)
+    monkeypatch.setattr(config, "llm_provider", "openai")
+    monkeypatch.setattr(config, "cheap_model_name", "gpt-test")
+    client = LLMClient()
+
+    async def failing_call(*args, **kwargs):
+        raise TimeoutError("provider timeout")
+
+    monkeypatch.setattr(client, "_call_openai", failing_call)
+    try:
+        with tracker.scope("sim-a"), pytest.raises(TimeoutError):
+            await client.call(
+                [{"role": "user", "content": "hello"}],
+                component="AgentWorker",
+            )
+
+        with factory() as session:
+            call = session.query(LLMCall).one()
+        assert call.status == "failed"
+        assert call.error_type == "TimeoutError"
+        assert call.cost_usd == 0
+    finally:
+        engine.dispose()

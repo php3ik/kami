@@ -48,6 +48,7 @@ class Simulation(Base):
     db_path = Column(String, nullable=True)
     graph_path = Column(String, nullable=True)
     total_cost_usd = Column(Float, nullable=False, default=0.0)
+    budget_limit_usd = Column(Float, nullable=True)
     created_at = Column(DateTime, nullable=False, default=_utcnow_naive)
     updated_at = Column(
         DateTime,
@@ -59,6 +60,35 @@ class Simulation(Base):
     __table_args__ = (
         Index("ix_simulations_active", "is_active"),
         Index("ix_simulations_updated", "updated_at"),
+    )
+
+
+class LLMCall(Base):
+    """Persistent accounting record for an attempted LLM call."""
+
+    __tablename__ = "llm_calls"
+
+    call_id = Column(String, primary_key=True)
+    simulation_id = Column(String, nullable=True)
+    provider = Column(String, nullable=False)
+    model = Column(String, nullable=False)
+    component = Column(String, nullable=False)
+    tick = Column(Integer, nullable=True)
+    status = Column(String, nullable=False, default="completed")
+    input_tokens = Column(Integer, nullable=False, default=0)
+    output_tokens = Column(Integer, nullable=False, default=0)
+    cache_read_tokens = Column(Integer, nullable=False, default=0)
+    cache_write_tokens = Column(Integer, nullable=False, default=0)
+    cost_usd = Column(Float, nullable=False, default=0.0)
+    error_type = Column(String, nullable=True)
+    error_message = Column(Text, nullable=True)
+    started_at = Column(DateTime, nullable=False, default=_utcnow_naive)
+    completed_at = Column(DateTime, nullable=False, default=_utcnow_naive)
+
+    __table_args__ = (
+        Index("ix_llm_calls_sim_completed", "simulation_id", "completed_at"),
+        Index("ix_llm_calls_sim_tick", "simulation_id", "tick"),
+        Index("ix_llm_calls_sim_component", "simulation_id", "component"),
     )
 
 

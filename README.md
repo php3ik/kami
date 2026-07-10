@@ -104,6 +104,7 @@ ANTHROPIC_API_KEY=sk-ant-...
 OPENAI_API_KEY=sk-...
 GEMINI_API_KEY=...
 DATABASE_URL=sqlite:///./kami_sim.db
+SIMULATION_BUDGET_USD=0
 
 LLM_PROVIDER=openai
 CHEAP_MODEL=gpt-5.4-mini
@@ -146,6 +147,8 @@ Useful endpoints:
 - `GET /api/graph`
 - `GET /api/settings/llm`
 - `PUT /api/settings/llm`
+- `GET /api/simulations/{simulation_id}/budget`
+- `PUT /api/simulations/{simulation_id}/budget`
 - `POST /api/world-map/generate`
 - `GET /api/entity/{entity_id}`
 
