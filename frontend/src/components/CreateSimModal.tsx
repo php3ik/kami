@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useSimStore } from '../stores/simStore'
-import { Loader2, RotateCcw, Square } from 'lucide-react'
+import { Languages, Loader2, RotateCcw, Square } from 'lucide-react'
+import type { ContentLanguage } from '../api/client'
 
 export default function CreateSimModal() {
   const {
@@ -9,6 +10,7 @@ export default function CreateSimModal() {
   const [name, setName] = useState('')
   const [prompt, setPrompt] = useState('')
   const [count, setCount] = useState(10)
+  const [contentLanguage, setContentLanguage] = useState<ContentLanguage>('en')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -17,7 +19,7 @@ export default function CreateSimModal() {
     setLoading(true)
     setError(null)
     try {
-      await createSim(prompt, count, name.trim() || undefined)
+      await createSim(prompt, count, name.trim() || undefined, contentLanguage)
       openCreateModal(false)
     } catch (e) {
       console.error(e)
@@ -111,6 +113,32 @@ export default function CreateSimModal() {
                 required
               />
             </div>
+
+            <fieldset>
+              <legend className="mb-1 flex items-center gap-2 text-sm font-medium text-gray-400">
+                <Languages size={15} /> Content Language
+              </legend>
+              <div className="grid grid-cols-2 overflow-hidden rounded border border-gray-700 bg-gray-900 p-1">
+                {([
+                  ['en', 'English'],
+                  ['uk', 'Українська'],
+                ] as const).map(([value, label]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    aria-pressed={contentLanguage === value}
+                    onClick={() => setContentLanguage(value)}
+                    className={`px-3 py-2 text-sm font-medium transition-colors ${
+                      contentLanguage === value
+                        ? 'bg-indigo-600 text-white'
+                        : 'text-gray-400 hover:bg-gray-800 hover:text-gray-100'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </fieldset>
             {worldBuildJob && ['failed', 'cancelled'].includes(worldBuildJob.status) && (
               <button
                 type="button"

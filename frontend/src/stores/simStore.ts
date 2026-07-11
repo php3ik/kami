@@ -61,7 +61,12 @@ interface SimState {
   loadTimeline: () => Promise<void>
   selectTimelineCell: (kind: 'agent' | 'kami', id: string, tick: number) => Promise<void>
   openCreateModal: (open: boolean) => void
-  createSim: (prompt: string, count: number, name?: string) => Promise<void>
+  createSim: (
+    prompt: string,
+    count: number,
+    name: string | undefined,
+    contentLanguage: api.ContentLanguage,
+  ) => Promise<void>
   cancelWorldBuild: () => Promise<void>
   resumeWorldBuild: () => Promise<void>
 }
@@ -352,8 +357,8 @@ export const useSimStore = create<SimState>((set, get) => ({
 
   openCreateModal: (open) => set({ isCreateModalOpen: open }),
 
-  createSim: async (prompt, count, name) => {
-    const started = await api.createSim(prompt, count, name)
+  createSim: async (prompt, count, name, contentLanguage) => {
+    const started = await api.createSim(prompt, count, name, contentLanguage)
     set({ worldBuildJob: started.job })
     await waitForWorldBuild(started.job.job_id, set)
     set({

@@ -19,6 +19,7 @@ from ..factstore.tools import (
     query_kami_state,
 )
 from ..memory import memory_runtime
+from ..language import get_simulation_language, language_instruction
 from ..spatial.graph import SpatialGraph
 from sqlalchemy.orm import Session
 from .scene_dynamics import SceneDynamics
@@ -241,6 +242,10 @@ def build_kami_prompt(
     Returns (system_blocks, messages) for the LLM call.
     """
     # 1. System prompt (cached)
+    content_language = get_simulation_language(
+        session, kami_entity.simulation_id
+    )
+    language_contract = language_instruction(content_language)
     # 2. Kami identity (cached)
     identity = _build_identity(kami_entity)
 
@@ -285,6 +290,7 @@ def build_kami_prompt(
     # Build system blocks with caching
     system_blocks = [
         {"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": language_contract, "cache_control": {"type": "ephemeral"}},
     ]
     if identity:
         system_blocks.append(
@@ -328,7 +334,7 @@ def build_kami_prompt(
 {adjacent_block}
 
 ### Task
-Adjudicate this tick as a typed state diff. Reject blocked preconditions, resolve conflicts in the listed initiative order, and call tools only for validated consequences. When using move_entity, use one exact adjacent kami ID. Agent movement schedules travel; do not claim immediate arrival. End with exactly one emit_event call containing a concise factual summary. Do not write literary narrative; a separate renderer runs only after the diff commits."""
+Adjudicate this tick as a typed state diff. Reject blocked preconditions, resolve conflicts in the listed initiative order, and call tools only for validated consequences. Write every human-readable tool field in the required content language, while keeping enum values and IDs unchanged. When using move_entity, use one exact adjacent kami ID. Agent movement schedules travel; do not claim immediate arrival. End with exactly one emit_event call containing a concise factual summary. Do not write literary narrative; a separate renderer runs only after the diff commits."""
 
     messages = [{"role": "user", "content": user_content}]
 

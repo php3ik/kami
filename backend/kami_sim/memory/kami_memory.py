@@ -19,6 +19,7 @@ from ..factstore.models import (
     KamiMemorySummary,
 )
 from ..llm.client import llm_client
+from ..language import get_simulation_language, language_instruction, message
 
 logger = logging.getLogger(__name__)
 
@@ -220,6 +221,7 @@ class KamiMemoryStore:
             )
             name = kami.canonical_name
             identity = dict(kami.archetype or {})
+            content_language = get_simulation_language(session, simulation_id)
             event_payload = [
                 {
                     "tick": event.tick,
@@ -234,7 +236,12 @@ class KamiMemoryStore:
             session.close()
 
         summary = await self._summarize_day(
-            name, identity, event_payload, imprint_facts, end_tick
+            name,
+            identity,
+            event_payload,
+            imprint_facts,
+            end_tick,
+            content_language,
         )
         peak_salience = max(item["salience"] for item in event_payload)
         session = self.session_factory()
@@ -303,9 +310,10 @@ class KamiMemoryStore:
         events: list[dict],
         imprints: list[str],
         tick: int,
+        content_language: str = "en",
     ) -> str:
         fallback = " ".join(item["narrative"].strip() for item in events if item["narrative"])
-        fallback = fallback[:3000] or "The location remained quiet."
+        fallback = fallback[:3000] or message("location_quiet", content_language)
         if not self._llm_available():
             return fallback
         event_text = "\n".join(
@@ -329,7 +337,10 @@ class KamiMemoryStore:
                         ),
                     }
                 ],
-                system="You write durable spatial memory for a simulated place.",
+                system=(
+                    language_instruction(content_language)
+                    + " You write durable spatial memory for a simulated place."
+                ),
                 tier="cheap",
                 component="KamiConsolidator",
                 tick=tick,

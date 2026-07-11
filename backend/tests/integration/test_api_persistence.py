@@ -108,7 +108,11 @@ async def test_lifespan_imports_legacy_registry_into_database(tmp_path, monkeypa
             monkeypatch.setattr(server, "build_world", reject_world)
             create_response = await client.post(
                 "/api/sim/create",
-                json={"prompt": "A world that exceeds its cap", "agent_count": 2},
+                json={
+                    "prompt": "Світ, що перевищує бюджет",
+                    "agent_count": 2,
+                    "content_language": "uk",
+                },
             )
             assert create_response.status_code == 202
             job_id = create_response.json()["job"]["job_id"]
@@ -127,6 +131,7 @@ async def test_lifespan_imports_legacy_registry_into_database(tmp_path, monkeypa
             ]
             assert len(failed_records) == 1
             assert failed_records[0]["status"] == "failed"
+            assert failed_records[0]["content_language"] == "uk"
 
     # The file is import-only; runtime writes are persisted in the database.
     assert json.loads(registry_path.read_text(encoding="utf-8"))["active_id"] == "legacy-sim"

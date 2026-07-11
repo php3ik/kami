@@ -14,6 +14,7 @@ from ..comms.channels import get_agent_channels
 from ..factstore import tools as fs
 from ..factstore.models import Entity
 from ..memory import memory_runtime
+from ..language import get_simulation_language, language_instruction
 from .containment import filter_perception
 
 
@@ -117,6 +118,10 @@ def build_agent_prompt(
     Returns (system_blocks, messages).
     """
     archetype = agent_entity.archetype or {}
+    content_language = get_simulation_language(
+        session, agent_entity.simulation_id
+    )
+    language_contract = language_instruction(content_language)
 
     # 1. System prompt (cached)
     # 2. Persona (cached for agent lifetime)
@@ -184,6 +189,7 @@ def build_agent_prompt(
     # Build system blocks with caching
     system_blocks = [
         {"type": "text", "text": AGENT_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": language_contract, "cache_control": {"type": "ephemeral"}},
         {"type": "text", "text": persona, "cache_control": {"type": "ephemeral"}},
     ]
 
@@ -230,7 +236,7 @@ def build_agent_prompt(
 {_format_destinations(available_destinations)}
 
 ### Task
-Think as {agent_entity.canonical_name}. Brief inner monologue (1-3 sentences in your voice). Then call `intend` to declare what you do. If you want to move, use the EXACT kami ID from the destinations list as the target."""
+Think as {agent_entity.canonical_name}. Use the required content language for your inner monologue, spoken utterance, message content, goals, expected outcomes, and belief text. Brief inner monologue (1-3 sentences in your voice). Then call `intend` to declare what you do. If you want to move, use the EXACT kami ID from the destinations list as the target."""
 
     messages = [{"role": "user", "content": user_content}]
     return system_blocks, messages

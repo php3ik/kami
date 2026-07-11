@@ -15,6 +15,11 @@ from ..comms.inbox import get_feed_digest, get_inbox_digest
 from ..factstore import tools as fs
 from ..factstore.models import Entity
 from ..llm.client import llm_client
+from ..language import (
+    get_simulation_language,
+    message,
+    structured_text_matches_language,
+)
 from ..spatial.graph import SpatialGraph
 from .containment import validate_agent_output
 from .prompt_builder import (
@@ -100,6 +105,22 @@ class AgentCognitionWorker:
 
         # Parse response
         result = self._parse_response(response, agent_id, agent_entity)
+        language = get_simulation_language(self.session, agent_entity.simulation_id)
+        language_payload = {
+            "inner_monologue": result.get("inner_monologue", ""),
+            "intents": [
+                {
+                    key: intent.get(key)
+                    for key in ("goal", "utterance", "expected_outcome", "params")
+                }
+                for intent in result.get("intents", [])
+            ],
+        }
+        if not structured_text_matches_language(language_payload, language):
+            logger.warning(
+                "Agent %s violated simulation language %s", agent_id, language
+            )
+            result = self.fallback(agent_id, reason="language_mismatch")
         result["processed_message_ids"] = [
             item["message_id"] for item in [*inbox, *feed]
         ]
@@ -177,15 +198,19 @@ class AgentCognitionWorker:
         }
 
     def fallback(self, agent_id: str, reason: str | None = None) -> dict:
-        inner_monologue = "I pause, unable to gather my thoughts clearly this moment."
+        agent = self.session.get(Entity, agent_id)
+        language = get_simulation_language(
+            self.session, agent.simulation_id if agent is not None else None
+        )
+        inner_monologue = message("agent_fallback", language)
         if reason:
-            label = "LLM request timed out" if reason == "timeout" else "LLM request failed"
+            label = message("timeout" if reason == "timeout" else "llm_error", language)
             inner_monologue = f"{inner_monologue} [{label}]"
         return {
             "agent_id": agent_id,
             "intents": [{
                 "agent_id": agent_id,
-                "agent_name": "unknown",
+                "agent_name": agent.canonical_name if agent is not None else "unknown",
                 "action_type": "wait",
                 "target": "",
                 "params": {},

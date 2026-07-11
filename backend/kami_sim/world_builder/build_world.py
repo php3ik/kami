@@ -14,6 +14,7 @@ from pathlib import Path
 from ..config import config
 from ..determinism import generate_id
 from ..factstore import tools as fs
+from ..language import normalize_content_language
 from ..memory.episodic_store import seed_archetype_memories
 from ..spatial.graph import SpatialGraph
 
@@ -27,6 +28,7 @@ async def build_world(
     prompt: str,
     agent_count: int = 100,
     name: str | None = None,
+    content_language: str = "en",
     *,
     checkpoint: dict | None = None,
     progress_callback=None,
@@ -44,6 +46,7 @@ async def build_world(
         prompt,
         agent_count=agent_count,
         name=name,
+        content_language=content_language,
         checkpoint=checkpoint,
         progress_callback=progress_callback,
         checkpoint_callback=checkpoint_callback,
@@ -58,6 +61,12 @@ def main():
     parser.add_argument("--agents", type=int, default=100, help="Number of agents")
     parser.add_argument("--name", type=str, default=None, help="Optional world name")
     parser.add_argument(
+        "--language",
+        choices=("en", "uk"),
+        default="en",
+        help="Language for all diegetic world content",
+    )
+    parser.add_argument(
         "--import-db",
         action="store_true",
         help="Import the completed world into the configured database",
@@ -71,7 +80,14 @@ def main():
     args = parser.parse_args()
 
     import asyncio
-    result = asyncio.run(build_world(args.prompt, agent_count=args.agents, name=args.name))
+    result = asyncio.run(
+        build_world(
+            args.prompt,
+            agent_count=args.agents,
+            name=args.name,
+            content_language=normalize_content_language(args.language),
+        )
+    )
 
     Path(args.output).write_text(
         json.dumps(result, indent=2, ensure_ascii=False, default=str),

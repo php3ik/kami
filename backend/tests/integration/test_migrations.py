@@ -64,6 +64,7 @@ def test_migrations_build_fresh_schema_without_drift(tmp_path):
             for row in database.execute("PRAGMA table_info(agent_memory_profiles)")
         }
     assert "budget_limit_usd" in simulation_columns
+    assert "content_language" in simulation_columns
     assert "provenance" in insight_columns
     assert "last_narrative_tick" in profile_columns
 

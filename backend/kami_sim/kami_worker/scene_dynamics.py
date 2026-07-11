@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from ..eventbus.bus import EventBus
 from ..factstore import tools as fs
+from ..language import choose, get_simulation_language, language_instruction
 from ..factstore.models import ConversationThread, Entity, Event
 from ..spatial.graph import SpatialGraph
 
@@ -62,9 +63,11 @@ class SceneDynamics:
     repeated_topic_hint: str
     intent_assessments: list[dict]
     conflict_groups: list[dict]
+    content_language: str = "en"
 
     def to_prompt_block(self) -> str:
         lines = [
+            language_instruction(self.content_language),
             "Scene constraints are authoritative. Use them to resolve the tick.",
             f"- Speaking budget: at most {self.speaking_budget} agents may speak in this kami this tick; others can watch, move, work, or think silently.",
             "- Every conversation beat must change state: answer, refusal, disclosure, physical movement, relationship shift, thread pause/resolution, or a named blocker.",
@@ -126,6 +129,9 @@ def analyze_scene_dynamics(
     spatial_graph: SpatialGraph,
 ) -> SceneDynamics:
     state = fs.query_kami_state(session, kami_id)
+    content_language = get_simulation_language(
+        session, fs.resolve_simulation_id(session, kami_id)
+    )
     present_ids = {entity["entity_id"] for entity in state.get("entities", [])}
     adjacent_kami_ids = set(spatial_graph.get_neighbors(kami_id))
 
@@ -133,7 +139,13 @@ def analyze_scene_dynamics(
         entity["entity_id"]: entity for entity in state.get("entities", [])
     }
     intent_assessments = [
-        _assess_intent(intent, present_ids, adjacent_kami_ids, entity_by_id)
+        _assess_intent(
+            intent,
+            present_ids,
+            adjacent_kami_ids,
+            entity_by_id,
+            content_language,
+        )
         for intent in agent_intents
     ]
     invalid_intents = [
@@ -170,6 +182,7 @@ def analyze_scene_dynamics(
         repeated_topic_hint=topic_hint,
         intent_assessments=intent_assessments,
         conflict_groups=conflict_groups,
+        content_language=content_language,
     )
 
 
@@ -236,6 +249,7 @@ def _assess_intent(
     present_ids: set[str],
     adjacent_kami_ids: set[str],
     entity_by_id: dict[str, dict],
+    content_language: str = "en",
 ) -> dict:
     action = str(intent.get("action_type") or "wait")
     target = str(intent.get("target") or "").strip()
@@ -253,7 +267,11 @@ def _assess_intent(
     if assessment["agent_id"] not in present_ids:
         assessment.update(
             status="blocked",
-            reason="acting agent is not present in this kami",
+            reason=choose(
+                content_language,
+                en="acting agent is not present in this kami",
+                uk="агент, який виконує дію, відсутній у цьому місці",
+            ),
         )
         return assessment
 
@@ -263,14 +281,22 @@ def _assess_intent(
             return assessment
         assessment.update(
             status="blocked",
-            reason="movement target is not an adjacent kami id",
+            reason=choose(
+                content_language,
+                en="movement target is not an adjacent kami id",
+                uk="ціль переміщення не є ідентифікатором сусіднього місця",
+            ),
         )
         return assessment
 
     if action in {"talk", "use_object"} and not target:
         assessment.update(
             status="blocked",
-            reason=f"{action} requires a concrete target id",
+            reason=choose(
+                content_language,
+                en=f"{action} requires a concrete target id",
+                uk=f"дія {action} потребує конкретного ідентифікатора цілі",
+            ),
         )
         return assessment
 
@@ -283,16 +309,31 @@ def _assess_intent(
         if action == "talk" and target_kind != "agent":
             assessment.update(
                 status="blocked",
-                reason="talk target is not a present agent",
+                reason=choose(
+                    content_language,
+                    en="talk target is not a present agent",
+                    uk="ціль розмови не є присутнім агентом",
+                ),
             )
             return assessment
         if action == "talk" and target == assessment["agent_id"]:
-            assessment.update(status="blocked", reason="agent cannot talk to itself")
+            assessment.update(
+                status="blocked",
+                reason=choose(
+                    content_language,
+                    en="agent cannot talk to itself",
+                    uk="агент не може розмовляти сам із собою",
+                ),
+            )
             return assessment
         if action == "use_object" and target_kind == "agent":
             assessment.update(
                 status="blocked",
-                reason="use_object target is an agent, not an object",
+                reason=choose(
+                    content_language,
+                    en="use_object target is an agent, not an object",
+                    uk="ціль use_object є агентом, а не об'єктом",
+                ),
             )
             return assessment
         archetype = target_entity.get("archetype") or {}
@@ -306,12 +347,20 @@ def _assess_intent(
         if _looks_like_unknown_target(target):
             assessment.update(
                 status="blocked",
-                reason="ambiguous unknown target is not a concrete entity id",
+                reason=choose(
+                    content_language,
+                    en="ambiguous unknown target is not a concrete entity id",
+                    uk="неоднозначна невідома ціль не є конкретним ідентифікатором сутності",
+                ),
             )
             return assessment
         assessment.update(
             status="blocked",
-            reason="target is not present in this kami",
+            reason=choose(
+                content_language,
+                en="target is not present in this kami",
+                uk="ціль відсутня в цьому місці",
+            ),
         )
     return assessment
 
@@ -357,7 +406,11 @@ def _block_invalid_target_intents(mutations: list[dict], dynamics: SceneDynamics
             "type": "record_intent_result",
             "intent_id": intent_id,
             "status": "blocked",
-            "summary": f"Target {intent.get('target')!r} was not a concrete present entity.",
+            "summary": choose(
+                dynamics.content_language,
+                en=f"Target {intent.get('target')!r} was not a concrete present entity.",
+                uk=f"Ціль {intent.get('target')!r} не є конкретною присутньою сутністю.",
+            ),
             "blockers": ["target_not_present"],
         })
 
@@ -407,9 +460,17 @@ def _force_loop_consequence(
         "kami_id": kami_id,
         "thread_id": thread.thread_id if thread else None,
         "participants": participants,
-        "topic": thread.topic if thread else dynamics.repeated_topic_hint or "stalled exchange",
+        "topic": thread.topic if thread else dynamics.repeated_topic_hint or choose(
+            dynamics.content_language,
+            en="stalled exchange",
+            uk="розмова, що зайшла в глухий кут",
+        ),
         "status": "paused",
-        "summary": "The repeated question stops producing new information, so the scene pauses until someone brings a concrete answer or action.",
+        "summary": choose(
+            dynamics.content_language,
+            en="The repeated question stops producing new information, so the scene pauses until someone brings a concrete answer or action.",
+            uk="Повторене питання більше не дає нової інформації, тому розмова призупиняється, доки хтось не запропонує конкретну відповідь або дію.",
+        ),
         "tension": min(1.0, (thread.tension if thread else 0.45) + 0.1),
         "momentum": 0.15,
         "open_question": None,
@@ -420,7 +481,11 @@ def _force_loop_consequence(
                 "type": "record_intent_result",
                 "intent_id": intent["intent_id"],
                 "status": "blocked",
-                "summary": "The question has already been pressed several times; the scene needs a new tactic or answer.",
+                "summary": choose(
+                    dynamics.content_language,
+                    en="The question has already been pressed several times; the scene needs a new tactic or answer.",
+                    uk="Це питання вже наполегливо повторювали кілька разів; потрібна нова тактика або відповідь.",
+                ),
                 "blockers": ["conversation_loop_requires_consequence"],
             })
 
@@ -430,7 +495,11 @@ def _force_loop_consequence(
         event["participants"] = participants[: dynamics.speaking_budget]
         event["narrative"] = _append_once(
             event.get("narrative", ""),
-            "The repeated questioning reaches a limit; without a concrete answer, the exchange pauses and the people present have to change tactics.",
+            choose(
+                dynamics.content_language,
+                en="The repeated questioning reaches a limit; without a concrete answer, the exchange pauses and the people present have to change tactics.",
+                uk="Повторні запитання вичерпують себе; без конкретної відповіді розмова призупиняється, а присутнім доведеться змінити тактику.",
+            ),
         )
         payload = dict(event.get("payload") or {})
         payload["loop_break_applied"] = True

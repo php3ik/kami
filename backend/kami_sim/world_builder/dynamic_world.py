@@ -127,11 +127,18 @@ WORLD_TOOLS = [{
 }]
 
 
-async def build_dynamic_world(prompt: str, agent_count: int, name: str | None = None) -> dict:
+async def build_dynamic_world(
+    prompt: str,
+    agent_count: int,
+    name: str | None = None,
+    content_language: str = "en",
+) -> dict:
     """Backward-compatible entry point for the canonical staged pipeline."""
     from .staged import build_staged_world
 
-    return await build_staged_world(prompt, agent_count, name)
+    return await build_staged_world(
+        prompt, agent_count, name, content_language=content_language
+    )
 
 
 async def _generate_world(

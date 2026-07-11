@@ -40,6 +40,7 @@ class Simulation(Base):
     id = Column(String, primary_key=True)
     name = Column(String, nullable=False)
     prompt = Column(Text, nullable=False, default="")
+    content_language = Column(String(2), nullable=False, default="en")
     status = Column(String, nullable=False, default="paused")
     current_tick = Column(Integer, nullable=False, default=0)
     is_active = Column(Boolean, nullable=False, default=False)

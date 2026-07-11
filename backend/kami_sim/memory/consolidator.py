@@ -18,6 +18,7 @@ from ..factstore.models import (
     SemanticInsight,
 )
 from ..llm.client import llm_client
+from ..language import get_simulation_language, language_instruction, message
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +102,18 @@ class MemoryConsolidator:
     def __init__(self, session_factory=None):
         self.session_factory = session_factory
         self._agent_states: dict[str, AgentMemoryState] = {}
+
+    def _content_language(self, agent_id: str) -> str:
+        if self.session_factory is None:
+            return "en"
+        session = self.session_factory()
+        try:
+            agent = session.get(Entity, agent_id)
+            return get_simulation_language(
+                session, agent.simulation_id if agent is not None else None
+            )
+        finally:
+            session.close()
 
     def get_state(self, agent_id: str) -> AgentMemoryState:
         if self.session_factory is None:
@@ -237,8 +250,12 @@ class MemoryConsolidator:
     async def _summarize_day(
         self, agent_id: str, memories: list[dict], persona: dict
     ) -> dict:
+        content_language = self._content_language(agent_id)
         if not memories:
-            return {"summary": "An uneventful day.", "candidate_insights": []}
+            return {
+                "summary": message("uneventful_day", content_language),
+                "candidate_insights": [],
+            }
         memory_text = "\n".join(
             f"- [tick {memory.get('tick', '?')}] {memory.get('content', '')}"
             for memory in memories
@@ -263,7 +280,12 @@ INSIGHTS:
 - [insight 2]""",
                     }
                 ],
-                system="You summarize a person's daily experiences into a brief diary entry and extract grounded insights about people, self, or the world.",
+                system=(
+                    language_instruction(content_language)
+                    + " Keep the structural section markers SUMMARY: and INSIGHTS: exactly in English, "
+                    "but write their contents in the required content language. You summarize a "
+                    "person's daily experiences into a brief diary entry and extract grounded insights."
+                ),
                 tier="cheap",
                 component="Consolidator",
                 max_tokens=500,
@@ -283,7 +305,10 @@ INSIGHTS:
             return {"summary": summary or text, "candidate_insights": insights}
         except Exception as exc:
             logger.error("Day summarization failed for %s: %s", agent_id, exc)
-            return {"summary": "The day passed.", "candidate_insights": []}
+            return {
+                "summary": message("day_passed", content_language),
+                "candidate_insights": [],
+            }
 
     def _llm_available(self, tier: str = "strong") -> bool:
         model = (
@@ -325,6 +350,7 @@ INSIGHTS:
             for insight in state.insights
         ]
         try:
+            content_language = self._content_language(agent_id)
             response = await llm_client.call(
                 messages=[
                     {
@@ -340,7 +366,8 @@ INSIGHTS:
                     }
                 ],
                 system=(
-                    "You maintain a psychologically coherent semantic memory. Use the "
+                    language_instruction(content_language)
+                    + " You maintain a psychologically coherent semantic memory. Use the "
                     "integrate_insights tool once and ground every operation in a candidate."
                 ),
                 tier="strong",
@@ -493,6 +520,7 @@ INSIGHTS:
         if not self._llm_available():
             return {}
         try:
+            content_language = self._content_language(agent_id)
             response = await llm_client.call(
                 messages=[
                     {
@@ -509,7 +537,10 @@ INSIGHTS:
                         ),
                     }
                 ],
-                system="You update a person's goal hierarchy through conservative deltas.",
+                system=(
+                    language_instruction(content_language)
+                    + " You update a person's goal hierarchy through conservative deltas."
+                ),
                 tier="strong",
                 component="MemoryConsolidator",
                 tick=tick,
@@ -602,6 +633,7 @@ INSIGHTS:
             key=lambda insight: (insight.last_reinforced_tick, insight.strength),
         )[:8]
         try:
+            content_language = self._content_language(agent_id)
             response = await llm_client.call(
                 messages=[
                     {
@@ -620,7 +652,10 @@ INSIGHTS:
                         ),
                     }
                 ],
-                system="You maintain a coherent life narrative without inventing events.",
+                system=(
+                    language_instruction(content_language)
+                    + " You maintain a coherent life narrative without inventing events."
+                ),
                 tier="strong",
                 component="MemoryConsolidator",
                 tick=tick,

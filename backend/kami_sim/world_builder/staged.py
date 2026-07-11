@@ -11,6 +11,11 @@ from typing import Any
 
 from ..config import config
 from ..llm.client import llm_client
+from ..language import (
+    language_instruction,
+    normalize_content_language,
+    structured_text_matches_language,
+)
 from ..spatial.graph import SpatialGraph
 from .contracts import validate_complete_world
 from .dynamic_world import (
@@ -52,12 +57,14 @@ async def build_staged_world(
     prompt: str,
     agent_count: int,
     name: str | None = None,
+    content_language: str = "en",
     *,
     checkpoint: dict | None = None,
     progress_callback: ProgressCallback | None = None,
     checkpoint_callback: CheckpointCallback | None = None,
     cancel_check: CancelCheck | None = None,
 ) -> dict:
+    content_language = normalize_content_language(content_language)
     state = dict(checkpoint or {})
     completed = list(state.get("completed_stages") or [])
     world = dict(state.get("world") or {})
@@ -72,7 +79,9 @@ async def build_staged_world(
     if "seed" not in completed:
         await _check_cancel(cancel_check)
         await _progress(progress_callback, "seed", 0, "Generating the world bible")
-        world["world_seed"] = await _generate_seed(prompt, agent_count, name)
+        world["world_seed"] = await _generate_seed(
+            prompt, agent_count, name, content_language
+        )
         await finish_stage("seed", "World bible complete")
 
     if "spatial" not in completed:
@@ -169,18 +178,24 @@ async def build_staged_world(
             agent["life_narrative"] = str(backstory.get("life_narrative") or "").strip()
             agent["memories"] = _normalize_memories(backstory.get("memories") or [])
         world = _normalize_world(world, prompt, agent_count, name)
+        world.setdefault("world_seed", {})["content_language"] = content_language
         errors = validate_complete_world(world, agent_count)
         if errors:
             raise ValueError("WorldBuilder validation failed: " + "; ".join(errors[:30]))
         await finish_stage("backstories", "World generation complete")
 
     world["slot_inventory"] = state.get("slot_inventory") or {}
+    world.setdefault("world_seed", {})["content_language"] = content_language
     world["budget"] = {"pipeline": "staged_v2", "stages": list(STAGES)}
     return world
 
 
-async def _generate_seed(prompt: str, agent_count: int, name: str | None) -> dict:
+async def _generate_seed(
+    prompt: str, agent_count: int, name: str | None, content_language: str = "en"
+) -> dict:
+    language_contract = language_instruction(content_language)
     result = await _json_call(
+        f"{language_contract}\n\n"
         f"Create a grounded world bible from this exact simulation premise:\n{prompt}\n\n"
         f"World name: {name or 'derive one'}\nPopulation: {agent_count}.\n"
         "Return JSON with key world_seed containing name, premise, geography, history, "
@@ -189,12 +204,14 @@ async def _generate_seed(prompt: str, agent_count: int, name: str | None) -> dic
         tier="strong",
         max_tokens=3500,
         temperature=0.45,
+        content_language=content_language,
     )
     seed = result.get("world_seed") if isinstance(result.get("world_seed"), dict) else result
     if not isinstance(seed, dict) or len(str(seed.get("premise") or "")) < 20:
         raise ValueError("WorldBuilder seed stage returned an incomplete world bible")
     seed.setdefault("name", name or seed.get("town_name") or "Generated World")
     seed.setdefault("premise", prompt)
+    seed["content_language"] = normalize_content_language(content_language)
     return seed
 
 
@@ -202,8 +219,9 @@ async def _generate_spatial(
     prompt: str, agent_count: int, name: str | None, world_seed: dict
 ) -> dict:
     target = max(6, min(28, math.ceil(agent_count / 4) + 6))
+    language_contract = language_instruction(world_seed.get("content_language"))
     return await _json_call(
-        f"Build the complete spatial layer for this world.\nPremise: {prompt}\n"
+        f"{language_contract}\n\nBuild the complete spatial layer for this world.\nPremise: {prompt}\n"
         f"World bible: {json.dumps(world_seed, ensure_ascii=False)}\n"
         f"Create {target} concrete Kami locations for {agent_count} people. Return JSON keys "
         "kami_specs and spatial_graph. Every Kami needs entity_id, name, kind, district, "
@@ -214,6 +232,7 @@ async def _generate_spatial(
         tier="strong",
         max_tokens=14000,
         temperature=0.45,
+        content_language=world_seed.get("content_language"),
     )
 
 
@@ -231,8 +250,11 @@ async def _generate_population_batch(
         {"name": item.get("name"), "role": item.get("role"), "traits": item.get("traits")}
         for item in existing
     ]
+    language_contract = language_instruction(
+        (world.get("world_seed") or {}).get("content_language")
+    )
     result = await _json_call(
-        f"Generate exactly {batch_size} new distinct agents, indexes {start + 1}-{start + batch_size}.\n"
+        f"{language_contract}\n\nGenerate exactly {batch_size} new distinct agents, indexes {start + 1}-{start + batch_size}.\n"
         f"Premise: {prompt}\nWorld: {json.dumps(world.get('world_seed'), ensure_ascii=False)}\n"
         f"Kami IDs and slots: {json.dumps(slot_inventory, ensure_ascii=False)}\n"
         f"Existing personas to avoid duplicating: {json.dumps(summaries, ensure_ascii=False)}\n"
@@ -245,6 +267,7 @@ async def _generate_population_batch(
         tier="strong",
         max_tokens=7500,
         temperature=0.75,
+        content_language=(world.get("world_seed") or {}).get("content_language"),
     )
     agents = result.get("agents") or []
     if len(agents) != batch_size:
@@ -253,8 +276,11 @@ async def _generate_population_batch(
 
 
 async def _generate_relationship_batch(prompt: str, world: dict, pairs: list[dict]) -> list[dict]:
+    language_contract = language_instruction(
+        (world.get("world_seed") or {}).get("content_language")
+    )
     result = await _json_call(
-        f"Enrich these exact social candidate pairs for the world `{prompt}`:\n"
+        f"{language_contract}\n\nEnrich these exact social candidate pairs for the world `{prompt}`:\n"
         f"{json.dumps(pairs, ensure_ascii=False)}\n"
         "Return {\"relationships\": [...]}, exactly one per pair, preserving exact names. "
         "Each needs rel_type, trust, tension, and a concrete 2-4 sentence origin with obligation, "
@@ -263,6 +289,7 @@ async def _generate_relationship_batch(prompt: str, world: dict, pairs: list[dic
         tier="cheap",
         max_tokens=5000,
         temperature=0.55,
+        content_language=(world.get("world_seed") or {}).get("content_language"),
     )
     relationships = result.get("relationships") or []
     if len(relationships) != len(pairs):
@@ -273,8 +300,11 @@ async def _generate_relationship_batch(prompt: str, world: dict, pairs: list[dic
 
 
 async def _generate_object_batch(prompt: str, world: dict, job: dict) -> list[dict]:
+    language_contract = language_instruction(
+        (world.get("world_seed") or {}).get("content_language")
+    )
     result = await _json_call(
-        f"Generate exactly {job['count']} interactive physical objects for these Kami in `{prompt}`:\n"
+        f"{language_contract}\n\nGenerate exactly {job['count']} interactive physical objects for these Kami in `{prompt}`:\n"
         f"{json.dumps(job['kami'], ensure_ascii=False)}\n"
         "Return {\"objects\": [...]}. Use exact kami_id values. Include tools, documents, supplies, "
         "personal items, communication devices, damaged items, evidence and affordances implied by "
@@ -284,6 +314,7 @@ async def _generate_object_batch(prompt: str, world: dict, job: dict) -> list[di
         tier="cheap",
         max_tokens=5000,
         temperature=0.45,
+        content_language=(world.get("world_seed") or {}).get("content_language"),
     )
     objects = result.get("objects") or []
     if len(objects) != job["count"]:
@@ -297,8 +328,11 @@ async def _generate_backstory_batch(prompt: str, world: dict, agents: list[dict]
         rel for rel in world.get("relationships", [])
         if names.intersection(rel.get("names") or [])
     ]
+    language_contract = language_instruction(
+        (world.get("world_seed") or {}).get("content_language")
+    )
     result = await _json_call(
-        f"Generate final backstories for these agents in `{prompt}`:\n"
+        f"{language_contract}\n\nGenerate final backstories for these agents in `{prompt}`:\n"
         f"Agents: {json.dumps(agents, ensure_ascii=False)}\n"
         f"Relationships: {json.dumps(relationships, ensure_ascii=False)}\n"
         "Return {\"backstories\": [...]}, exactly one per agent with exact name, a 250-500 word "
@@ -309,6 +343,7 @@ async def _generate_backstory_batch(prompt: str, world: dict, agents: list[dict]
         tier="cheap",
         max_tokens=7500,
         temperature=0.55,
+        content_language=(world.get("world_seed") or {}).get("content_language"),
     )
     backstories = result.get("backstories") or []
     if len(backstories) != len(agents):
@@ -323,12 +358,16 @@ async def _json_call(
     tier: str,
     max_tokens: int,
     temperature: float,
+    content_language: str = "en",
 ) -> dict:
     last_error: Exception | None = None
     for attempt in range(2):
         prompt = content
         if attempt:
-            prompt += "\n\nThe prior response was not parseable. Return one compact valid JSON object only."
+            prompt += (
+                "\n\nThe prior response was invalid or used the wrong content language. "
+                "Return one compact valid JSON object only and obey the content language contract."
+            )
         response = await llm_client.call(
             messages=[{"role": "user", "content": prompt}],
             system=system,
@@ -340,7 +379,12 @@ async def _json_call(
             timeout_seconds=config.world_builder_timeout_seconds,
         )
         try:
-            return _world_from_response(response)
+            result = _world_from_response(response)
+            if not structured_text_matches_language(result, content_language):
+                raise ValueError(
+                    "WorldBuilder response violated the content language contract"
+                )
+            return result
         except ValueError as exc:
             last_error = exc
     raise last_error or ValueError("WorldBuilder returned no structured data")

@@ -16,6 +16,14 @@ from ..config import config
 from ..eventbus.bus import EventBus
 from ..factstore import tools as fs
 from ..llm.client import llm_client
+from ..language import (
+    choose,
+    get_simulation_language,
+    language_instruction,
+    message,
+    structured_text_matches_language,
+    text_matches_language,
+)
 from ..spatial.graph import SpatialGraph
 from .prompt_builder import KAMI_TOOLS, build_kami_prompt
 from .scene_dynamics import analyze_scene_dynamics, apply_scene_guardrails
@@ -127,7 +135,28 @@ class KamiWorker:
 
         # Parse tool calls into propose-list
         result = self._parse_response(response, kami_id, tick, agent_intents)
-        result["fallback"] = False
+        content_language = get_simulation_language(
+            self.session, kami_entity.simulation_id
+        )
+        language_payload = {
+            "events": [event.get("narrative", "") for event in result.get("events", [])],
+            "mutations": [
+                {
+                    key: mutation.get(key)
+                    for key in ("summary", "topic", "reason", "fact", "text", "content")
+                }
+                for mutation in result.get("mutations", [])
+            ],
+        }
+        if not structured_text_matches_language(language_payload, content_language):
+            logger.warning(
+                "Kami %s violated simulation language %s", kami_id, content_language
+            )
+            result = self._fallback_result(
+                kami_id, tick, agent_intents, reason="language_mismatch"
+            )
+        else:
+            result["fallback"] = False
         self._append_comms_intents(result, agent_intents)
         result = apply_scene_guardrails(
             result, scene_dynamics, kami_id, tick, agent_intents
@@ -197,6 +226,7 @@ class KamiWorker:
             for mutation in proposal.get("mutations", [])
         ]
         prompt = (
+            f"{language_instruction(get_simulation_language(self.session, fs.resolve_simulation_id(self.session, kami_id)))}\n\n"
             "Render this already-committed local scene in 2-4 concise diegetic sentences. "
             "Do not invent actions, dialogue, thoughts, identities, objects, outcomes, or state "
             "changes. Preserve uncertainty in the factual summary. Use names only from the "
@@ -226,7 +256,11 @@ class KamiWorker:
                 narrative = self._clean_narrative(
                     str((tool_call.get("input") or {}).get("narrative") or "")
                 )
-                if narrative:
+                content_language = get_simulation_language(
+                    self.session,
+                    fs.resolve_simulation_id(self.session, kami_id),
+                )
+                if narrative and text_matches_language(narrative, content_language):
                     return narrative
         except Exception as exc:
             logger.warning(
@@ -500,6 +534,12 @@ class KamiWorker:
             "the model",
             "tool call",
             "agent intent",
+            "я вирішу",
+            "як камі",
+            "симуляція",
+            "мовна модель",
+            "виклик інструмента",
+            "намір агента",
         ]
         if any(marker in lowered for marker in blocked):
             return ""
@@ -507,10 +547,23 @@ class KamiWorker:
 
     def _factual_event_fallback(self, kami_id: str, event_type: str) -> str:
         kami = self.session.get(fs.Entity, kami_id)
-        place = kami.canonical_name if kami is not None else "The location"
+        language = get_simulation_language(
+            self.session, kami.simulation_id if kami is not None else None
+        )
+        place = kami.canonical_name if kami is not None else choose(
+            language, en="the location", uk="цьому місці"
+        )
         if event_type in {"idle", "background"}:
-            return f"Nothing changes in {place} during this tick."
-        return f"The attempted {event_type} produces no additional committed change in {place}."
+            return choose(
+                language,
+                en=f"Nothing changes in {place} during this tick.",
+                uk=f"У {place} протягом цього тіку нічого не змінюється.",
+            )
+        return choose(
+            language,
+            en=f"The attempted {event_type} produces no additional committed change in {place}.",
+            uk=f"Спроба дії типу {event_type} не створює додаткових зафіксованих змін у {place}.",
+        )
     def _normalize_participants(
         self, participants: list, kami_id: str
     ) -> list[str]:
@@ -558,20 +611,23 @@ class KamiWorker:
     def _deterministic_resolution(
         self, kami_id: str, tick: int, agent_intents: list[dict], fallback_text: str
     ) -> dict:
+        simulation_id = fs.resolve_simulation_id(self.session, kami_id)
+        language = get_simulation_language(self.session, simulation_id)
         if not agent_intents:
+            idle_text = message("idle_tick", language)
             return {
                 "events": [{
                     "kami_id": kami_id,
                     "tick": tick,
                     "event_type": "idle",
                     "participants": [],
-                    "narrative": fallback_text or "The station hums through an uneventful minute.",
+                    "narrative": fallback_text or idle_text,
                     "salience": 0.1,
                     "payload": {},
                 }],
                 "mutations": [],
                 "broadcasts": [],
-                "narrative": fallback_text or "The station hums through an uneventful minute.",
+                "narrative": fallback_text or idle_text,
             }
 
         mutations = []
@@ -583,7 +639,7 @@ class KamiWorker:
             agent_id = intent.get("agent_id")
             if agent_id:
                 participants.append(agent_id)
-            agent_name = intent.get("agent_name") or agent_id or "Someone"
+            agent_name = intent.get("agent_name") or agent_id or message("someone", language)
             action = intent.get("action_type", "wait")
             target = intent.get("target") or ""
             utterance = intent.get("utterance") or intent.get("params", {}).get("speech") or ""
@@ -597,25 +653,49 @@ class KamiWorker:
                     "reason": "agent intent fallback resolution",
                     "intent_id": intent.get("intent_id"),
                 })
-                beats.append(f"{agent_name} pushes off toward {target}, turning intention into motion.")
+                beats.append(choose(
+                    language,
+                    en=f"{agent_name} pushes off toward {target}, turning intention into motion.",
+                    uk=f"{agent_name} рушає до {target}, перетворюючи намір на дію.",
+                ))
             elif action == "talk":
-                line = f' and says, "{utterance}"' if utterance else ""
-                beats.append(f"{agent_name} opens a concrete exchange{line}.")
+                line = choose(
+                    language,
+                    en=f' and says, "{utterance}"' if utterance else "",
+                    uk=f' і каже: «{utterance}»' if utterance else "",
+                )
+                beats.append(choose(
+                    language,
+                    en=f"{agent_name} opens a concrete exchange{line}.",
+                    uk=f"{agent_name} починає предметну розмову{line}.",
+                ))
                 if target:
                     participants.append(target)
                 mutations.append({
                     "type": "update_conversation_thread",
                     "kami_id": kami_id,
                     "participants": [p for p in [agent_id, target] if p],
-                    "topic": intent.get("goal") or "unfinished crew exchange",
-                    "summary": utterance or f"{agent_name} tries to pull the conversation forward.",
+                    "topic": intent.get("goal") or choose(
+                        language,
+                        en="unfinished conversation",
+                        uk="незавершена розмова",
+                    ),
+                    "summary": utterance or choose(
+                        language,
+                        en=f"{agent_name} tries to pull the conversation forward.",
+                        uk=f"{agent_name} намагається просунути розмову вперед.",
+                    ),
                     "status": "active",
                     "tension": 0.45,
                     "momentum": 0.55,
                     "open_question": intent.get("expected_outcome") or None,
                 })
             elif action in {"work", "use_object"}:
-                beats.append(f"{agent_name} starts hands-on work" + (f" on {target}" if target else "") + ".")
+                beats.append(choose(
+                    language,
+                    en=f"{agent_name} starts hands-on work" + (f" on {target}" if target else "") + ".",
+                    uk=f"{agent_name} береться до практичної роботи" + (f" з {target}" if target else "") + ".",
+                ))
                 mutations.append({
                     "type": "adjust_need",
                     "agent_id": agent_id,
@@ -623,9 +703,17 @@ class KamiWorker:
                     "delta": -0.03,
                 })
             elif action == "observe":
-                beats.append(f"{agent_name} studies the scene" + (f" around {target}" if target else "") + ", looking for a useful next move.")
+                beats.append(choose(
+                    language,
+                    en=f"{agent_name} studies the scene" + (f" around {target}" if target else "") + ", looking for a useful next move.",
+                    uk=f"{agent_name} уважно оглядає місце" + (f" біля {target}" if target else "") + ", шукаючи корисний наступний крок.",
+                ))
             else:
-                beats.append(f"{agent_name} chooses to {action}" + (f" around {target}" if target else "") + ".")
+                beats.append(choose(
+                    language,
+                    en=f"{agent_name} chooses to {action}" + (f" around {target}" if target else "") + ".",
+                    uk=f"{agent_name} обирає дію {action}" + (f" біля {target}" if target else "") + ".",
+                ))
 
             if intent.get("intent_id"):
                 mutations.append({
@@ -637,7 +725,11 @@ class KamiWorker:
 
         narrative = " ".join(beats[:4])
         if len(beats) > 4:
-            narrative += " The rest of the room shifts around those choices."
+            narrative += choose(
+                language,
+                en=" The rest of the room shifts around those choices.",
+                uk=" Решта присутніх реагує на ці рішення.",
+            )
         return {
             "events": [{
                 "kami_id": kami_id,

@@ -185,11 +185,23 @@ export async function startRun(ticks = 100) {
   return parseResponse(res)
 }
 
-export async function createSim(prompt: string, count: number, name?: string) {
+export type ContentLanguage = 'en' | 'uk'
+
+export async function createSim(
+  prompt: string,
+  count: number,
+  name: string | undefined,
+  contentLanguage: ContentLanguage,
+) {
   const res = await apiFetch(`${API_BASE}/sim/create`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompt, agent_count: count, name })
+    body: JSON.stringify({
+      prompt,
+      agent_count: count,
+      name,
+      content_language: contentLanguage,
+    })
   })
   return parseResponse(res)
 }

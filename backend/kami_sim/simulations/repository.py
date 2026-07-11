@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from ..factstore.models import Simulation
+from ..language import normalize_content_language
 
 
 def _utcnow_naive() -> datetime:
@@ -40,6 +41,7 @@ class SimulationRepository:
             "id": simulation.id,
             "name": simulation.name,
             "prompt": simulation.prompt,
+            "content_language": normalize_content_language(simulation.content_language),
             "status": simulation.status,
             "current_tick": simulation.current_tick,
             "graph_data": simulation.graph_data or {},
@@ -231,6 +233,9 @@ class SimulationRepository:
     def _apply_record(simulation: Simulation, record: dict) -> None:
         simulation.name = record.get("name") or simulation.id
         simulation.prompt = record.get("prompt") or ""
+        simulation.content_language = normalize_content_language(
+            record.get("content_language")
+        )
         simulation.status = record.get("status") or "paused"
         simulation.current_tick = max(0, int(record.get("current_tick") or 0))
         simulation.graph_data = record.get("graph_data") or {}

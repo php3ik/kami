@@ -15,7 +15,7 @@ import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 import uuid
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException, Request
@@ -2581,6 +2581,7 @@ class CreateSimRequest(BaseModel):
     prompt: str = Field(min_length=3, max_length=20_000)
     agent_count: int = Field(default=10, ge=1, le=100)
     name: str | None = Field(default=None, max_length=120)
+    content_language: Literal["en", "uk"] = "en"
 
 
 async def _execute_world_build(job_id: str) -> None:
@@ -2639,6 +2640,7 @@ async def _execute_world_build(job_id: str) -> None:
                 request["prompt"],
                 agent_count=int(request["agent_count"]),
                 name=request.get("name"),
+                content_language=request.get("content_language", "en"),
                 checkpoint=job.get("checkpoint") or {},
                 progress_callback=report_progress,
                 checkpoint_callback=save_checkpoint,
@@ -2728,6 +2730,7 @@ async def create_sim(request: CreateSimRequest):
         "name": request.name
         or (request.prompt[:48] + ("..." if len(request.prompt) > 48 else "")),
         "prompt": request.prompt,
+        "content_language": request.content_language,
         "status": "building",
         "db_url": db_url,
         "db_path": str(_sqlite_path_from_url(db_url)),
