@@ -420,6 +420,15 @@ class TickScheduler:
             },
         }, time_context)
         self._commit_tick(session, tick, result)
+        await self._finalize_committed_narratives(
+            session,
+            kami_worker,
+            proposals,
+            staged,
+            result,
+            tick,
+            progress_callback,
+        )
         memory_runtime.index_committed(staged_memories)
 
         # === PROPAGATE PHASE ===
@@ -437,6 +446,104 @@ class TickScheduler:
             logger.exception("Post-commit event propagation failed for tick %s", tick)
         await self._consolidate_memory(tick)
         return result
+
+    async def _finalize_committed_narratives(
+        self,
+        session: Session,
+        kami_worker,
+        proposals: list[dict],
+        staged,
+        result: dict,
+        tick: int,
+        progress_callback=None,
+    ) -> None:
+        """Render prose after canonical state commits; factual summaries remain fallback."""
+        renderer = getattr(kami_worker, "render_committed_narrative", None)
+        if not callable(renderer) or not staged.events:
+            return
+
+        accepted_ids = {id(proposal) for proposal, _ in staged.accepted}
+
+        async def render_one(proposal: dict):
+            if id(proposal) not in accepted_ids:
+                return proposal.get("kami_id"), "", []
+            kami_id = proposal.get("kami_id")
+            events = [
+                event for event in staged.events if event.get("kami_id") == kami_id
+            ]
+            if not kami_id or not events:
+                return kami_id, "", events
+            try:
+                narrative = await renderer(kami_id, tick, proposal, events)
+            except Exception:
+                logger.exception(
+                    "Post-commit narrative renderer crashed for %s tick %s",
+                    kami_id,
+                    tick,
+                )
+                narrative = ""
+            return kami_id, str(narrative or "").strip(), events
+
+        rendered = await asyncio.gather(*(render_one(proposal) for proposal in proposals))
+        updates: dict[str, str] = {}
+        narratives = dict(result.get("narratives") or {})
+        for kami_id, narrative, events in rendered:
+            if not narrative or not events:
+                continue
+            narratives[kami_id] = narrative
+            for event in events:
+                if (
+                    event.get("event_id")
+                    and str(event.get("narrative") or "").strip() != narrative
+                ):
+                    updates[event["event_id"]] = narrative
+
+        if not updates:
+            return
+
+        final_events = []
+        for event in result.get("events", []):
+            updated = dict(event)
+            if event.get("event_id") in updates:
+                updated["narrative"] = updates[event["event_id"]]
+            final_events.append(updated)
+        final_result = {**result, "events": final_events, "narratives": narratives}
+
+        try:
+            for event_id, narrative in updates.items():
+                row = session.get(fs.Event, event_id)
+                if row is not None:
+                    row.narrative = narrative
+            tick_record = (
+                session.query(SimulationTick)
+                .filter(
+                    SimulationTick.simulation_id == self._simulation_scope(),
+                    SimulationTick.tick == tick,
+                    SimulationTick.status == "committed",
+                )
+                .one_or_none()
+            )
+            if tick_record is not None:
+                tick_record.result = final_result
+            session.commit()
+        except Exception:
+            session.rollback()
+            logger.exception(
+                "Could not persist post-commit narratives for tick %s; factual summaries remain canonical",
+                tick,
+            )
+            return
+
+        result.clear()
+        result.update(final_result)
+        for event in staged.events:
+            if event.get("event_id") in updates:
+                event["narrative"] = updates[event["event_id"]]
+        await self._report_progress(progress_callback, {
+            "step": "narrative_finalize_end",
+            "tick": tick,
+            "kami_count": len({kami_id for kami_id, _, _ in rendered if kami_id}),
+        })
 
     @staticmethod
     async def _report_progress(callback, data: dict) -> None:

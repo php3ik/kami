@@ -10,6 +10,7 @@ from kami_sim.factstore.models import (
 from kami_sim.memory import memory_runtime
 from kami_sim.scheduler import tick_scheduler as scheduler_module
 from kami_sim.scheduler.tick_scheduler import TickScheduler
+from kami_sim.scheduler.write_committer import stage_proposals
 from kami_sim.simulations import SimulationRepository
 from kami_sim.spatial.graph import SpatialGraph
 
@@ -20,6 +21,136 @@ class DummySession:
 
     def close(self):
         pass
+
+
+@pytest.mark.asyncio
+async def test_post_commit_narrative_updates_event_and_tick_ledger():
+    engine, factory = init_db("sqlite:///:memory:")
+    repository = SimulationRepository(factory)
+    repository.upsert({"id": "sim-a", "name": "A"})
+    kami_id = "sim_sim-a__kami_room"
+    with factory() as setup:
+        fs.create_entity(
+            setup,
+            "kami",
+            "Room",
+            0,
+            entity_id=kami_id,
+            simulation_id="sim-a",
+        )
+        setup.commit()
+    graph = SpatialGraph()
+    graph.add_kami(kami_id, name="Room", kind="room")
+    scheduler = TickScheduler(factory, graph, simulation_id="sim-a")
+    session = factory()
+    proposal = {
+        "kami_id": kami_id,
+        "mutations": [],
+        "events": [{
+            "event_type": "action",
+            "narrative": "A factual action occurs.",
+            "salience": 0.5,
+        }],
+        "narrative": "A factual action occurs.",
+        "resolution_plan": {"conflict_groups": []},
+    }
+
+    class FakeRenderer:
+        async def render_committed_narrative(self, *args):
+            return "The committed action settles into a visible result."
+
+    try:
+        staged = stage_proposals(session, 0, [proposal], graph)
+        result = {
+            "tick": 0,
+            "events": list(staged.events),
+            "narratives": {kami_id: proposal["narrative"]},
+        }
+        scheduler._commit_tick(session, 0, result)
+
+        await scheduler._finalize_committed_narratives(
+            session,
+            FakeRenderer(),
+            [proposal],
+            staged,
+            result,
+            0,
+        )
+
+        with factory() as check:
+            event = check.query(Event).one()
+            tick = check.query(SimulationTick).one()
+        assert event.narrative == "The committed action settles into a visible result."
+        assert tick.status == "committed"
+        assert tick.result["narratives"][kami_id] == event.narrative
+        assert result["events"][0]["narrative"] == event.narrative
+    finally:
+        session.close()
+        engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_post_commit_narrative_failure_keeps_factual_committed_tick():
+    engine, factory = init_db("sqlite:///:memory:")
+    repository = SimulationRepository(factory)
+    repository.upsert({"id": "sim-a", "name": "A"})
+    kami_id = "sim_sim-a__kami_room"
+    with factory() as setup:
+        fs.create_entity(
+            setup,
+            "kami",
+            "Room",
+            0,
+            entity_id=kami_id,
+            simulation_id="sim-a",
+        )
+        setup.commit()
+    graph = SpatialGraph()
+    graph.add_kami(kami_id, name="Room", kind="room")
+    scheduler = TickScheduler(factory, graph, simulation_id="sim-a")
+    session = factory()
+    proposal = {
+        "kami_id": kami_id,
+        "mutations": [],
+        "events": [{
+            "event_type": "action",
+            "narrative": "The factual result remains available.",
+            "salience": 0.5,
+        }],
+        "narrative": "The factual result remains available.",
+    }
+
+    class CrashingRenderer:
+        async def render_committed_narrative(self, *args):
+            raise RuntimeError("renderer unavailable")
+
+    try:
+        staged = stage_proposals(session, 0, [proposal], graph)
+        result = {
+            "tick": 0,
+            "events": list(staged.events),
+            "narratives": {kami_id: proposal["narrative"]},
+        }
+        scheduler._commit_tick(session, 0, result)
+
+        await scheduler._finalize_committed_narratives(
+            session,
+            CrashingRenderer(),
+            [proposal],
+            staged,
+            result,
+            0,
+        )
+
+        with factory() as check:
+            event = check.query(Event).one()
+            tick = check.query(SimulationTick).one()
+        assert event.narrative == "The factual result remains available."
+        assert tick.status == "committed"
+        assert tick.result["events"][0]["narrative"] == event.narrative
+    finally:
+        session.close()
+        engine.dispose()
 
 
 @pytest.mark.asyncio

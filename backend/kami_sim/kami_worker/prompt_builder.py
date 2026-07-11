@@ -83,13 +83,20 @@ KAMI_TOOLS = [
     },
     {
         "name": "emit_event",
-        "description": "MANDATORY: Emit a summary event for this tick. Must be called exactly once at the end.",
+        "description": "MANDATORY: Emit one factual event record for this tick after all proposed mutations.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "event_type": {"type": "string", "description": "e.g. idle, conversation, action, arrival, departure"},
                 "participants": {"type": "array", "items": {"type": "string"}},
-                "narrative": {"type": "string", "description": "2-4 sentence description of what happened"},
+                "summary": {
+                    "type": "string",
+                    "description": "One factual sentence describing only resolved actions and consequences; no literary narration",
+                },
+                "narrative": {
+                    "type": "string",
+                    "description": "Backward-compatible factual summary; prefer summary",
+                },
                 "salience": {"type": "number", "minimum": 0.0, "maximum": 1.0},
                 "payload": {"type": "object"},
                 "causes": {
@@ -98,7 +105,7 @@ KAMI_TOOLS = [
                     "description": "IDs of earlier events that directly caused this event",
                 },
             },
-            "required": ["event_type", "narrative", "salience"],
+            "required": ["event_type", "summary", "salience"],
         },
     },
     {
@@ -259,7 +266,7 @@ def build_kami_prompt(
     present_entities = _format_present_entities(state)
 
     # 7. Agent intents
-    intents_block = _format_agent_intents(agent_intents)
+    intents_block = _format_agent_intents(agent_intents, scene_dynamics)
 
     # 8. Pending external events
     pending = event_bus.get_pending_events(tick, kami_id)
@@ -321,7 +328,7 @@ def build_kami_prompt(
 {adjacent_block}
 
 ### Task
-Resolve this tick. Call tools for any state changes. When using move_entity, you MUST use one of the exact kami IDs listed in Adjacent Locations above. Agent movement schedules travel; do not narrate immediate arrival. End with exactly one emit_event call summarizing what happened."""
+Adjudicate this tick as a typed state diff. Reject blocked preconditions, resolve conflicts in the listed initiative order, and call tools only for validated consequences. When using move_entity, use one exact adjacent kami ID. Agent movement schedules travel; do not claim immediate arrival. End with exactly one emit_event call containing a concise factual summary. Do not write literary narrative; a separate renderer runs only after the diff commits."""
 
     messages = [{"role": "user", "content": user_content}]
 
@@ -389,13 +396,27 @@ def _format_present_entities(state: dict) -> str:
             arch = entity["archetype"]
             if arch.get("description"):
                 lines.append(f"  description: {arch['description']}")
+            uses = arch.get("uses") or arch.get("affordances")
+            if uses:
+                if isinstance(uses, str):
+                    uses = [uses]
+                lines.append(f"  affordances: {json.dumps(uses[:8], ensure_ascii=False)}")
+            if arch.get("condition"):
+                lines.append(f"  declared_condition: {arch['condition']}")
     return "\n".join(lines) if lines else "No entities present."
 
 
-def _format_agent_intents(intents: list[dict]) -> str:
+def _format_agent_intents(
+    intents: list[dict],
+    scene_dynamics: SceneDynamics | None = None,
+) -> str:
     if not intents:
         return ""
     lines = []
+    assessment_by_id = {
+        item.get("intent_id"): item
+        for item in (scene_dynamics.intent_assessments if scene_dynamics else [])
+    }
     for intent in intents:
         agent = intent.get("agent_name", intent.get("agent_id", "unknown"))
         action = intent.get("action_type", "unknown")
@@ -413,8 +434,12 @@ def _format_agent_intents(intents: list[dict]) -> str:
             details.append(f"says={utterance}")
         if intent_id:
             details.append(f"intent_id={intent_id}")
+        assessment = assessment_by_id.get(intent_id)
+        status = assessment.get("status", "unassessed") if assessment else "unassessed"
+        if assessment and assessment.get("reason"):
+            details.append(f"precondition={assessment['reason']}")
         lines.append(
-            f"- {agent} intends to {action}"
+            f"- [{status.upper()}] {agent} intends to {action}"
             + (f" targeting {target}" if target else "")
             + (f" ({'; '.join(details)})" if details else "")
         )

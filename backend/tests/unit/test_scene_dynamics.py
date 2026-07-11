@@ -45,10 +45,23 @@ def test_scene_dynamics_blocks_ambiguous_unknown_targets():
         session, "kami_lane", 2, intents, [], [], graph
     )
     result = apply_scene_guardrails(
-        {"events": [], "mutations": []}, dynamics, "kami_lane", 2, intents
+        {
+            "events": [],
+            "mutations": [{
+                "type": "update_relation",
+                "from_entity": "agent_petro",
+                "to_entity": "unknown_person_1",
+                "rel_type": "trusts",
+            }],
+        },
+        dynamics,
+        "kami_lane",
+        2,
+        intents,
     )
 
     assert dynamics.invalid_intents
+    assert len(result["mutations"]) == 1
     assert result["mutations"][0]["type"] == "record_intent_result"
     assert result["mutations"][0]["status"] == "blocked"
     assert "target_not_present" in result["mutations"][0]["blockers"]
@@ -119,3 +132,47 @@ def test_scene_dynamics_forces_repeated_question_to_pause():
         for m in result["mutations"]
     )
     assert result["events"][0]["payload"]["loop_break_applied"] is True
+
+
+def test_scene_dynamics_builds_affordance_and_conflict_plan():
+    session = make_session()
+    graph = make_world(session)
+    fs.create_entity(
+        session,
+        "object",
+        "Shared radio",
+        tick=0,
+        entity_id="obj_radio",
+        archetype={"uses": ["send a weather report", "listen for replies"]},
+    )
+    fs.place_entity(session, "obj_radio", "kami_lane", tick=0)
+    intents = [
+        {
+            "intent_id": "int_petro",
+            "agent_id": "agent_petro",
+            "action_type": "use_object",
+            "target": "obj_radio",
+        },
+        {
+            "intent_id": "int_hanna",
+            "agent_id": "agent_hanna",
+            "action_type": "work",
+            "target": "obj_radio",
+        },
+    ]
+
+    dynamics = analyze_scene_dynamics(
+        session, "kami_lane", 2, intents, [], [], graph
+    )
+    plan = dynamics.to_resolution_plan()
+
+    assert all(item["status"] == "feasible" for item in plan["intent_assessments"])
+    assert plan["intent_assessments"][0]["affordances"] == [
+        "send a weather report",
+        "listen for replies",
+    ]
+    assert plan["conflict_groups"] == [{
+        "kind": "exclusive_resource",
+        "target": "obj_radio",
+        "intent_ids": ["int_petro", "int_hanna"],
+    }]

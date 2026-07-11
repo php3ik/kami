@@ -73,6 +73,7 @@ def test_commits_events_in_kami_order_and_preserves_causes():
         assert failures == []
         assert [event["kami_id"] for event in events] == ["kami_atrium", "kami_room"]
         assert events[0]["causes"] == ["evt_prior"]
+        assert events[0]["payload"]["resolution"]["committed_mutation_types"] == []
     finally:
         session.close()
         engine.dispose()

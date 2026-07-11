@@ -60,6 +60,8 @@ class SceneDynamics:
     speaking_budget: int
     active_threads: list[ConversationThread]
     repeated_topic_hint: str
+    intent_assessments: list[dict]
+    conflict_groups: list[dict]
 
     def to_prompt_block(self) -> str:
         lines = [
@@ -78,6 +80,25 @@ class SceneDynamics:
             lines.append(
                 "  Mark invalid-target intents as blocked, or create a concrete entity first if the world truly needs that person/object."
             )
+        feasible = [
+            item for item in self.intent_assessments if item["status"] == "feasible"
+        ]
+        if feasible:
+            lines.append("- Deterministically feasible intents:")
+            for item in feasible:
+                affordances = ", ".join(item.get("affordances") or []) or "none declared"
+                lines.append(
+                    f"  - intent_id={item.get('intent_id') or '?'} "
+                    f"action={item['action_type']} target={item.get('target') or '-'}; "
+                    f"affordances={affordances}"
+                )
+        if self.conflict_groups:
+            lines.append("- Intent conflicts requiring adjudication in initiative order:")
+            for conflict in self.conflict_groups:
+                lines.append(
+                    f"  - {conflict['kind']} target={conflict['target']}: "
+                    f"intent_ids={','.join(conflict['intent_ids'])}"
+                )
         if self.loop_break_required:
             lines.append(
                 f"- LOOP BREAK REQUIRED: similar open questions have repeated {self.repeated_question_count} times recently"
@@ -85,6 +106,14 @@ class SceneDynamics:
                 + ". This tick must answer, refuse, escalate, leave, pause, or resolve the thread."
             )
         return "\n".join(lines)
+
+    def to_resolution_plan(self) -> dict:
+        return {
+            "intent_assessments": list(self.intent_assessments),
+            "conflict_groups": list(self.conflict_groups),
+            "speaking_budget": self.speaking_budget,
+            "loop_break_required": self.loop_break_required,
+        }
 
 
 def analyze_scene_dynamics(
@@ -100,13 +129,23 @@ def analyze_scene_dynamics(
     present_ids = {entity["entity_id"] for entity in state.get("entities", [])}
     adjacent_kami_ids = set(spatial_graph.get_neighbors(kami_id))
 
-    invalid_intents = [
-        item for item in (
-            _validate_intent_target(intent, present_ids, adjacent_kami_ids, session)
-            for intent in agent_intents
-        )
-        if item is not None
+    entity_by_id = {
+        entity["entity_id"]: entity for entity in state.get("entities", [])
+    }
+    intent_assessments = [
+        _assess_intent(intent, present_ids, adjacent_kami_ids, entity_by_id)
+        for intent in agent_intents
     ]
+    invalid_intents = [
+        {**agent_intents[index], "reason": assessment["reason"]}
+        for index, assessment in enumerate(intent_assessments)
+        if assessment["status"] == "blocked"
+    ]
+    conflict_groups = _build_conflict_groups(
+        agent_intents,
+        intent_assessments,
+        entity_by_id,
+    )
 
     current_questions = [
         _intent_question_text(intent)
@@ -129,6 +168,8 @@ def analyze_scene_dynamics(
         speaking_budget=speaking_budget,
         active_threads=active_threads,
         repeated_topic_hint=topic_hint,
+        intent_assessments=intent_assessments,
+        conflict_groups=conflict_groups,
     )
 
 
@@ -143,6 +184,7 @@ def apply_scene_guardrails(
     mutations = result.setdefault("mutations", [])
     events = result.setdefault("events", [])
 
+    _reject_blocked_intent_effects(mutations, dynamics)
     _block_invalid_target_intents(mutations, dynamics)
     _trim_excess_speakers(events, dynamics)
     _force_loop_consequence(mutations, events, dynamics, kami_id, tick, agent_intents)
@@ -150,29 +192,155 @@ def apply_scene_guardrails(
     return result
 
 
-def _validate_intent_target(
+def _reject_blocked_intent_effects(
+    mutations: list[dict],
+    dynamics: SceneDynamics,
+) -> None:
+    blocked = [
+        intent
+        for intent in dynamics.invalid_intents
+        if intent.get("intent_id")
+    ]
+    if not blocked:
+        return
+
+    def implements_blocked_intent(mutation: dict, intent: dict) -> bool:
+        if mutation.get("type") == "record_intent_result":
+            return False
+        if mutation.get("intent_id") == intent.get("intent_id"):
+            return True
+        action = intent.get("action_type")
+        actor = intent.get("agent_id")
+        target = intent.get("target")
+        mutation_type = mutation.get("type")
+        if action == "move":
+            return mutation_type == "move_entity" and mutation.get("entity_id") == actor
+        if action in {"use_object", "work", "observe"}:
+            return mutation_type == "change_state" and mutation.get("entity_id") == target
+        if action == "talk" and mutation_type == "update_relation":
+            endpoints = {mutation.get("from_entity"), mutation.get("to_entity")}
+            return bool(actor and target and {actor, target} <= endpoints)
+        return False
+
+    mutations[:] = [
+        mutation
+        for mutation in mutations
+        if not any(
+            implements_blocked_intent(mutation, intent) for intent in blocked
+        )
+    ]
+
+
+def _assess_intent(
     intent: dict,
     present_ids: set[str],
     adjacent_kami_ids: set[str],
-    session: Session,
-) -> dict | None:
+    entity_by_id: dict[str, dict],
+) -> dict:
+    action = str(intent.get("action_type") or "wait")
     target = str(intent.get("target") or "").strip()
-    if not target:
-        return None
+    assessment = {
+        "intent_id": str(intent.get("intent_id") or ""),
+        "agent_id": str(intent.get("agent_id") or ""),
+        "action_type": action,
+        "target": target,
+        "status": "feasible",
+        "reason": "",
+        "preconditions": [],
+        "affordances": [],
+    }
 
-    action = intent.get("action_type", "")
+    if assessment["agent_id"] not in present_ids:
+        assessment.update(
+            status="blocked",
+            reason="acting agent is not present in this kami",
+        )
+        return assessment
+
     if action == "move":
         if target in adjacent_kami_ids:
-            return None
-        return {**intent, "reason": "movement target is not an adjacent kami id"}
+            assessment["preconditions"].append("target is adjacent")
+            return assessment
+        assessment.update(
+            status="blocked",
+            reason="movement target is not an adjacent kami id",
+        )
+        return assessment
+
+    if action in {"talk", "use_object"} and not target:
+        assessment.update(
+            status="blocked",
+            reason=f"{action} requires a concrete target id",
+        )
+        return assessment
+
+    if not target:
+        return assessment
 
     if target in present_ids:
-        return None
+        target_entity = entity_by_id.get(target) or {}
+        target_kind = target_entity.get("kind")
+        if action == "talk" and target_kind != "agent":
+            assessment.update(
+                status="blocked",
+                reason="talk target is not a present agent",
+            )
+            return assessment
+        if action == "talk" and target == assessment["agent_id"]:
+            assessment.update(status="blocked", reason="agent cannot talk to itself")
+            return assessment
+        if action == "use_object" and target_kind == "agent":
+            assessment.update(
+                status="blocked",
+                reason="use_object target is an agent, not an object",
+            )
+            return assessment
+        archetype = target_entity.get("archetype") or {}
+        uses = archetype.get("uses") or archetype.get("affordances") or []
+        if isinstance(uses, str):
+            uses = [uses]
+        assessment["affordances"] = [str(item) for item in uses[:8]]
+        assessment["preconditions"].append("target is present")
+        return assessment
     if action in {"talk", "observe", "use_object", "work"}:
         if _looks_like_unknown_target(target):
-            return {**intent, "reason": "ambiguous unknown target is not a concrete entity id"}
-        return {**intent, "reason": "target is not present in this kami"}
-    return None
+            assessment.update(
+                status="blocked",
+                reason="ambiguous unknown target is not a concrete entity id",
+            )
+            return assessment
+        assessment.update(
+            status="blocked",
+            reason="target is not present in this kami",
+        )
+    return assessment
+
+
+def _build_conflict_groups(
+    intents: list[dict],
+    assessments: list[dict],
+    entity_by_id: dict[str, dict],
+) -> list[dict]:
+    groups: dict[tuple[str, str], list[str]] = {}
+    for intent, assessment in zip(intents, assessments):
+        if assessment["status"] != "feasible" or not assessment.get("target"):
+            continue
+        action = assessment["action_type"]
+        target = assessment["target"]
+        target_kind = (entity_by_id.get(target) or {}).get("kind")
+        if action in {"use_object", "work"} and target_kind != "agent":
+            key = ("exclusive_resource", target)
+        elif action == "talk" and target_kind == "agent":
+            key = ("turn_taking", target)
+        else:
+            continue
+        groups.setdefault(key, []).append(str(intent.get("intent_id") or "?"))
+
+    return [
+        {"kind": kind, "target": target, "intent_ids": intent_ids}
+        for (kind, target), intent_ids in groups.items()
+        if len(intent_ids) > 1
+    ]
 
 
 def _block_invalid_target_intents(mutations: list[dict], dynamics: SceneDynamics) -> None:

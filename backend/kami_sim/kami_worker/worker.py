@@ -6,6 +6,7 @@ into FactStore mutations and emitted events.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -20,6 +21,22 @@ from .prompt_builder import KAMI_TOOLS, build_kami_prompt
 from .scene_dynamics import analyze_scene_dynamics, apply_scene_guardrails
 
 logger = logging.getLogger(__name__)
+
+
+NARRATIVE_TOOLS = [{
+    "name": "submit_narrative",
+    "description": "Render the committed factual scene without adding new events or dialogue.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "narrative": {
+                "type": "string",
+                "description": "Two to four grounded diegetic sentences based only on the committed diff",
+            },
+        },
+        "required": ["narrative"],
+    },
+}]
 
 
 class KamiWorker:
@@ -67,6 +84,16 @@ class KamiWorker:
             active_threads=active_threads,
             spatial_graph=self.spatial_graph,
         )
+        if not agent_intents and not self._has_resolution_pressure(
+            kami_id,
+            tick,
+            kami_entity.simulation_id,
+        ):
+            result = self._deterministic_resolution(kami_id, tick, [], "")
+            result["fallback"] = False
+            result["deterministic_idle"] = True
+            result["resolution_plan"] = scene_dynamics.to_resolution_plan()
+            return result
 
         # Build prompt
         system_blocks, messages = build_kami_prompt(
@@ -92,17 +119,123 @@ class KamiWorker:
             reason = "timeout" if isinstance(e, TimeoutError) else "llm_error"
             result = self._fallback_result(kami_id, tick, agent_intents, reason)
             self._append_comms_intents(result, agent_intents)
-            return apply_scene_guardrails(
+            result = apply_scene_guardrails(
                 result, scene_dynamics, kami_id, tick, agent_intents
             )
+            result["resolution_plan"] = scene_dynamics.to_resolution_plan()
+            return result
 
         # Parse tool calls into propose-list
         result = self._parse_response(response, kami_id, tick, agent_intents)
         result["fallback"] = False
         self._append_comms_intents(result, agent_intents)
-        return apply_scene_guardrails(
+        result = apply_scene_guardrails(
             result, scene_dynamics, kami_id, tick, agent_intents
         )
+        result["resolution_plan"] = scene_dynamics.to_resolution_plan()
+        return result
+
+    async def render_committed_narrative(
+        self,
+        kami_id: str,
+        tick: int,
+        proposal: dict,
+        committed_events: list[dict],
+    ) -> str:
+        """Render prose from a committed scene; never participate in resolution."""
+        factual = " ".join(
+            str(event.get("narrative") or "").strip()
+            for event in committed_events
+            if str(event.get("narrative") or "").strip()
+        ).strip()
+        if not committed_events or all(
+            event.get("event_type") in {"idle", "background"}
+            or float(event.get("salience", 0.0)) <= 0.15
+            for event in committed_events
+        ):
+            return factual
+
+        state = fs.query_kami_state(self.session, kami_id)
+        entities = {
+            entity["entity_id"]: entity["name"]
+            for entity in state.get("entities", [])
+        }
+        participant_ids = {
+            participant
+            for event in committed_events
+            for participant in event.get("participants", [])
+        }
+        for participant_id in participant_ids - entities.keys():
+            participant = self.session.get(fs.Entity, participant_id)
+            if participant is not None:
+                entities[participant_id] = participant.canonical_name
+        event_facts = [
+            {
+                "event_id": event.get("event_id"),
+                "event_type": event.get("event_type"),
+                "participants": [
+                    {"id": participant, "name": entities.get(participant, participant)}
+                    for participant in event.get("participants", [])
+                ],
+                "factual_summary": event.get("narrative", ""),
+                "salience": event.get("salience", 0.3),
+                "causes": event.get("causes", []),
+            }
+            for event in committed_events
+        ]
+        final_state = [
+            {
+                "id": entity["entity_id"],
+                "name": entity["name"],
+                "kind": entity["kind"],
+                "states": entity.get("states") or {},
+            }
+            for entity in state.get("entities", [])
+        ]
+        committed_diff = [
+            _narrative_safe_mutation(mutation)
+            for mutation in proposal.get("mutations", [])
+        ]
+        prompt = (
+            "Render this already-committed local scene in 2-4 concise diegetic sentences. "
+            "Do not invent actions, dialogue, thoughts, identities, objects, outcomes, or state "
+            "changes. Preserve uncertainty in the factual summary. Use names only from the "
+            "participant mapping. Return the submit_narrative tool.\n\n"
+            f"Tick: {tick}\nKami: {kami_id}\n"
+            f"Committed events: {json.dumps(event_facts, ensure_ascii=False)}\n"
+            f"Committed diff: {json.dumps(committed_diff, ensure_ascii=False)}\n"
+            f"Final local state: {json.dumps(final_state, ensure_ascii=False)}"
+        )
+        try:
+            response = await llm_client.call(
+                messages=[{"role": "user", "content": prompt}],
+                system=(
+                    "You are a diegetic scene renderer. The world is already committed. "
+                    "You may improve clarity and atmosphere but may not add facts."
+                ),
+                tier="cheap",
+                component="NarrativeRenderer",
+                tick=tick,
+                tools=NARRATIVE_TOOLS,
+                max_tokens=320,
+                temperature=0.55,
+            )
+            for tool_call in response.get("tool_calls", []):
+                if tool_call.get("name") != "submit_narrative":
+                    continue
+                narrative = self._clean_narrative(
+                    str((tool_call.get("input") or {}).get("narrative") or "")
+                )
+                if narrative:
+                    return narrative
+        except Exception as exc:
+            logger.warning(
+                "Committed narrative rendering failed for %s tick %s: %s",
+                kami_id,
+                tick,
+                exc,
+            )
+        return factual
 
     def _select_tier(self, agents: list, intents: list[dict]) -> str:
         """Route to cheap or strong model based on scene complexity."""
@@ -113,6 +246,25 @@ class KamiWorker:
             if max_salience > config.kami_strong_model_threshold_salience:
                 return "strong"
         return "cheap"
+
+    def _has_resolution_pressure(
+        self,
+        kami_id: str,
+        tick: int,
+        simulation_id: str,
+    ) -> bool:
+        if self.event_bus.get_pending_events(tick, kami_id):
+            return True
+        if self.event_bus.get_broadcasts(tick, kami_id):
+            return True
+        return any(
+            schedule.kami_id == kami_id
+            for schedule in fs.get_due_schedules(
+                self.session,
+                tick,
+                simulation_id,
+            )
+        )
 
     def _parse_response(
         self, response: dict, kami_id: str, tick: int, agent_intents: list[dict] | None = None
@@ -128,7 +280,16 @@ class KamiWorker:
             inp = tc["input"]
 
             if name == "emit_event":
-                narrative_text = self._clean_narrative(inp.get("narrative", ""))
+                narrative_text = self._clean_narrative(
+                    inp.get("summary") or inp.get("narrative", "")
+                )
+                if not narrative_text:
+                    narrative_text = self._factual_event_fallback(
+                        kami_id,
+                        inp.get("event_type", "idle"),
+                    )
+                payload = dict(inp.get("payload", {}))
+                payload["resolution_summary"] = narrative_text
                 events.append({
                     "kami_id": kami_id,
                     "tick": tick,
@@ -138,7 +299,8 @@ class KamiWorker:
                     ),
                     "narrative": narrative_text,
                     "salience": inp.get("salience", 0.3),
-                    "payload": inp.get("payload", {}),
+                    "payload": payload,
+                    "causes": list(inp.get("causes", [])),
                 })
             elif name == "move_entity":
                 mutations.append({
@@ -246,11 +408,14 @@ class KamiWorker:
         if not events:
             return self._deterministic_resolution(kami_id, tick, agent_intents or [], narrative)
 
+        factual_narrative = " ".join(
+            event["narrative"] for event in events if event.get("narrative")
+        )
         return {
             "events": events,
             "mutations": mutations,
             "broadcasts": broadcasts,
-            "narrative": narrative,
+            "narrative": factual_narrative or narrative,
         }
 
     def _append_comms_intents(self, result: dict, intents: list[dict]) -> None:
@@ -337,9 +502,15 @@ class KamiWorker:
             "agent intent",
         ]
         if any(marker in lowered for marker in blocked):
-            return "The moment tightens into a concrete beat, and the people present respond to what is directly in front of them."
+            return ""
         return text
 
+    def _factual_event_fallback(self, kami_id: str, event_type: str) -> str:
+        kami = self.session.get(fs.Entity, kami_id)
+        place = kami.canonical_name if kami is not None else "The location"
+        if event_type in {"idle", "background"}:
+            return f"Nothing changes in {place} during this tick."
+        return f"The attempted {event_type} produces no additional committed change in {place}."
     def _normalize_participants(
         self, participants: list, kami_id: str
     ) -> list[str]:
@@ -481,3 +652,29 @@ class KamiWorker:
             "broadcasts": [],
             "narrative": narrative,
         }
+
+
+def _narrative_safe_mutation(mutation: dict) -> dict:
+    allowed = {
+        "type",
+        "entity_id",
+        "to_kami_id",
+        "attribute",
+        "new_value",
+        "from_entity",
+        "to_entity",
+        "rel_type",
+        "agent_id",
+        "need",
+        "delta",
+        "value",
+        "status",
+        "summary",
+        "blockers",
+        "topic",
+        "participants",
+        "canonical_name",
+        "kind",
+        "reason",
+    }
+    return {key: value for key, value in mutation.items() if key in allowed}

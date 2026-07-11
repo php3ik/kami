@@ -55,6 +55,23 @@ def test_provider_prefixed_model_uses_known_pricing():
     assert prefixed.cost_usd == plain.cost_usd
 
 
+@pytest.mark.parametrize(
+    ("model", "input_rate", "output_rate"),
+    [
+        ("gpt-5.4-mini", 0.75, 4.50),
+        ("openai:gpt-5.4-mini", 0.75, 4.50),
+        ("gpt-5.5", 5.00, 30.00),
+    ],
+)
+def test_openai_models_use_configured_pricing(model, input_rate, output_rate):
+    tracker = BudgetTracker()
+
+    record = tracker.record_call(model, "KamiWorker", 10_000, 1_000)
+
+    expected = 10_000 * input_rate / 1_000_000 + 1_000 * output_rate / 1_000_000
+    assert record.cost_usd == pytest.approx(expected)
+
+
 def test_simulation_scope_separates_equal_tick_numbers():
     tracker = BudgetTracker()
 

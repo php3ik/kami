@@ -343,7 +343,7 @@ class LLMClient:
                     "type": "function",
                     "function": {"name": tools[0]["name"]},
                 }
-            elif component == "KamiWorker":
+            elif component in {"KamiWorker", "NarrativeRenderer"}:
                 kwargs["tool_choice"] = "required"
         if response_format:
             kwargs["response_format"] = response_format

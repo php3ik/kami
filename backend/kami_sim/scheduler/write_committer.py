@@ -87,13 +87,24 @@ def stage_proposals(
                         raise
 
                 for event_data in proposal.get("events", []):
+                    payload = dict(event_data.get("payload", {}))
+                    payload.setdefault(
+                        "resolution",
+                        {
+                            **dict(proposal.get("resolution_plan") or {}),
+                            "committed_mutation_types": [
+                                mutation.get("type")
+                                for mutation in proposal.get("mutations", [])
+                            ],
+                        },
+                    )
                     event = fs.emit_event(
                         session,
                         tick=tick,
                         kami_id=event_data.get("kami_id") or kami_id,
                         event_type=event_data["event_type"],
                         participants=event_data.get("participants", []),
-                        payload=event_data.get("payload", {}),
+                        payload=payload,
                         salience=event_data.get("salience", 0.3),
                         narrative=event_data.get("narrative", ""),
                         causes=event_data.get("causes", []),
