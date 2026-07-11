@@ -78,7 +78,9 @@ class MemoryRuntime:
             simulation_id=simulation_id,
         )
         memory_text = "\n".join(
-            f"- [tick {memory.tick}] {memory.content}" for memory in memories
+            f"- [REMEMBERED tick={memory.tick} event={memory.source_event_id or 'backstory'}] "
+            f"{memory.content}"
+            for memory in memories
         )
         return memory_text, self.consolidator.get_long_term_text(agent_id)
 

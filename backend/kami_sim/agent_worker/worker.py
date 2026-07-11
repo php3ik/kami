@@ -17,7 +17,11 @@ from ..factstore.models import Entity
 from ..llm.client import llm_client
 from ..spatial.graph import SpatialGraph
 from .containment import validate_agent_output
-from .prompt_builder import AGENT_TOOLS, build_agent_prompt
+from .prompt_builder import (
+    AGENT_TOOLS,
+    build_agent_prompt,
+    relation_is_visible_to_agent,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +152,8 @@ class AgentCognitionWorker:
         social_rels = fs.get_relations(self.session, agent_id, direction="both")
         known_names = set()
         for rel in social_rels:
+            if not relation_is_visible_to_agent(rel, agent_id):
+                continue
             other_id = rel.to_entity if rel.from_entity == agent_id else rel.from_entity
             other = self.session.get(Entity, other_id)
             if other:

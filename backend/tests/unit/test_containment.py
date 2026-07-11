@@ -96,3 +96,37 @@ def test_filter_excludes_self():
 
     filtered = filter_perception(kami_state, "agent_a", social_graph=set())
     assert len(filtered["entities"]) == 0
+
+
+def test_filter_perception_hides_internal_agent_and_closed_container_state():
+    kami_state = {
+        "kami_id": "kami_1",
+        "entities": [
+            {
+                "entity_id": "agent_a",
+                "kind": "agent",
+                "name": "Alice",
+                "archetype": {},
+                "states": {"activity": "working", "fatigue": 0.9, "mood": "afraid"},
+            },
+            {
+                "entity_id": "obj_1",
+                "kind": "object",
+                "name": "Sealed case",
+                "archetype": {},
+                "states": {
+                    "container_closed": True,
+                    "contents": ["private letter"],
+                    "integrity": 0.8,
+                },
+            },
+        ],
+    }
+
+    filtered = filter_perception(kami_state, "agent_b", social_graph={"agent_a"})
+
+    assert filtered["entities"][0]["states"] == {"activity": "working"}
+    assert filtered["entities"][1]["states"] == {
+        "container_closed": True,
+        "integrity": 0.8,
+    }

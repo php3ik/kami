@@ -24,6 +24,8 @@ CRITICAL RULES:
 2. You do NOT know the names of people you have never met. They appear as descriptions.
 3. You do NOT know what is happening in other places unless someone told you.
 4. You do NOT have access to information outside your experience.
+EPISTEMIC LABELS: OBSERVED and OBSERVED_EVENT are evidence; REMEMBERED may be incomplete; BELIEVED and REFLECTION may be wrong; TOLD_BY and FEED_POST are claims, not automatically facts.
+BELIEF DISCIPLINE: Update a belief only when this tick gives you evidence. Never turn another person's private attitude or an unverified message into objective truth.
 5. Your inner monologue should be in YOUR voice — use the speech patterns, vocabulary, and emotional register from your persona.
 
 BAD example: "I notice that John, the baker who recently argued with his wife, is here."
@@ -153,9 +155,11 @@ def build_agent_prompt(
     social_relations = fs.get_relations(session, agent_entity.entity_id, direction="both")
     social_graph_ids = set()
     for rel in social_relations:
-        other = rel.to_entity if rel.from_entity == agent_entity.entity_id else rel.from_entity
-        social_graph_ids.add(other)
+        if relation_is_visible_to_agent(rel, agent_entity.entity_id):
+            other = rel.to_entity if rel.from_entity == agent_entity.entity_id else rel.from_entity
+            social_graph_ids.add(other)
     social_block = _build_social_block(session, agent_entity.entity_id, social_relations, kami_state)
+    beliefs_block = _format_beliefs(fs.get_beliefs(session, agent_entity.entity_id))
     needs_block = _format_needs(fs.get_agent_needs(session, agent_entity.entity_id))
     threads_block = _format_threads(
         fs.get_active_conversations(session, kami_id=kami_id, agent_id=agent_entity.entity_id)
@@ -163,7 +167,7 @@ def build_agent_prompt(
 
     # 8. Filtered perception (epistemic containment)
     perception = filter_perception(kami_state, agent_entity.entity_id, social_graph_ids)
-    perception_block = _format_perception(perception)
+    perception_block = _format_perception(perception, tick)
 
     # 9. Recent personal buffer
     personal_buffer = _format_personal_buffer(recent_personal_events)
@@ -198,10 +202,13 @@ def build_agent_prompt(
 ### Relevant Memories
 {memories}
 
+### Current Beliefs (subjective, not canon)
+{beliefs_block or "You have no explicit current beliefs beyond direct perception and memory."}
+
 ### Active Social Threads
 {threads_block or "No active thread involving you here."}
 
-{f'### Long-Term Understanding{chr(10)}{long_term_memory}' if long_term_memory else ''}
+{f'### Long-Term Understanding (subjective reflection){chr(10)}[REFLECTION]{chr(10)}{long_term_memory}' if long_term_memory else ''}
 
 ### People You Know (present or relevant)
 {social_block or "You don't know anyone here."}
@@ -209,7 +216,7 @@ def build_agent_prompt(
 ### WHAT_YOU_PERCEIVE
 {perception_block}
 
-### Recent Actions (yours)
+### Recent Observed Events
 {personal_buffer or "You just arrived or woke up."}
 
 {f'### Messages{chr(10)}{comms}' if comms else ''}
@@ -288,17 +295,84 @@ def _build_social_block(
         other_id = rel.to_entity if rel.from_entity == agent_id else rel.from_entity
         other = session.get(Entity, other_id)
         if other and other.kind == "agent":
+            outgoing = rel.from_entity == agent_id
+            if not relation_is_visible_to_agent(rel, agent_id):
+                continue
             present_marker = " [HERE]" if other_id in present_ids else ""
-            weight_info = ""
-            if rel.weight and isinstance(rel.weight, dict):
-                weight_info = f" ({', '.join(f'{k}={v}' for k, v in rel.weight.items())})"
-            elif rel.weight:
-                weight_info = f" ({rel.weight})"
-            lines.append(f"- {other.canonical_name}: {rel.rel_type}{weight_info}{present_marker}")
+            weight_info = _visible_relation_weight(
+                rel.weight,
+                agent_id,
+                allow_default=outgoing,
+            )
+            direction = "your relation to" if outgoing else "known relation toward you from"
+            lines.append(
+                f"- [KNOWN_RELATION since={rel.since_tick}] {direction} "
+                f"{other.canonical_name}: {rel.rel_type}{weight_info}{present_marker}"
+            )
     return "\n".join(lines)
 
 
-def _format_perception(perception: dict) -> str:
+def relation_is_visible_to_agent(relation, agent_id: str) -> bool:
+    if relation.from_entity == agent_id:
+        return True
+    weight = relation.weight if isinstance(relation.weight, dict) else {}
+    visibility = str(weight.get("visibility") or "").casefold()
+    if visibility in {"public", "shared", "to_target"}:
+        return True
+    return relation.rel_type in {
+        "married_to",
+        "friends_with",
+        "sibling_of",
+        "parent_of",
+        "child_of",
+        "employs",
+        "owes",
+        "knows",
+    }
+
+
+def _visible_relation_weight(
+    weight: Any,
+    agent_id: str,
+    *,
+    allow_default: bool,
+) -> str:
+    if not isinstance(weight, dict):
+        return ""
+    visible_keys = {
+        "affection",
+        "dependence",
+        "familiarity",
+        "strength",
+        "tension",
+        "trust",
+        "value",
+    }
+    raw_allowed = weight.get("visible_to") or []
+    allowed = (
+        {str(item) for item in raw_allowed}
+        if isinstance(raw_allowed, list)
+        else {str(raw_allowed)}
+    )
+    visibility = str(weight.get("visibility") or "").casefold()
+    explicitly_visible = (
+        visibility in {"public", "shared", "to_target"}
+        or agent_id in allowed
+    )
+    visible = {
+        key: value
+        for key, value in weight.items()
+        if key in visible_keys and (allow_default or explicitly_visible)
+    }
+    if explicitly_visible:
+        if weight.get("known_history"):
+            visible["known_history"] = weight["known_history"]
+    if not visible:
+        return ""
+    return f" ({', '.join(f'{key}={value}' for key, value in visible.items())})"
+
+
+def _format_perception(perception: dict, tick: int) -> str:
     if not perception["entities"]:
         return "You are alone. The place is quiet."
     lines = []
@@ -307,7 +381,8 @@ def _format_perception(perception: dict) -> str:
         if e.get("states"):
             states_str = " — " + ", ".join(f"{k}: {v}" for k, v in e["states"].items())
         lines.append(
-            f"- target_id: {e['entity_id']} | {e['name']} ({e['kind']}){states_str}"
+            f"- [OBSERVED tick={tick}] target_id: {e['entity_id']} | "
+            f"{e['name']} ({e['kind']}){states_str}"
         )
     return "\n".join(lines)
 
@@ -316,8 +391,13 @@ def _format_personal_buffer(events: list[dict] | None) -> str:
     if not events:
         return ""
     lines = []
-    for evt in events:
-        lines.append(f"- [tick {evt.get('tick', '?')}]: {evt.get('narrative', evt.get('action', ''))}")
+    for evt in reversed(events):
+        source = evt.get("source", "observed")
+        event_id = evt.get("event_id", "unknown")
+        lines.append(
+            f"- [OBSERVED_EVENT tick={evt.get('tick', '?')} source={source} "
+            f"event={event_id}]: {evt.get('narrative', evt.get('action', ''))}"
+        )
     return "\n".join(lines)
 
 
@@ -327,13 +407,32 @@ def _format_recent_intents(intents: list) -> str:
         target = f" -> {intent.target}" if intent.target else ""
         result = intent.result_summary or "pending"
         lines.append(
-            f"- [tick {intent.tick}] {intent.action_type}{target}: {intent.status}; {result}"
+            f"- [ACTION_RESULT tick={intent.tick}] {intent.action_type}{target}: "
+            f"{intent.status}; {result}"
         )
     return "\n".join(lines)
 
 
 def _format_needs(needs: dict[str, float]) -> str:
     return "\n".join(f"- {need}: {value:.2f}" for need, value in sorted(needs.items()))
+
+
+def _format_beliefs(beliefs: list) -> str:
+    latest = {}
+    for belief in sorted(beliefs, key=lambda item: item.since_tick, reverse=True):
+        key = (belief.kind, belief.target_entity, belief.attribute)
+        latest.setdefault(key, belief)
+
+    lines = []
+    for belief in list(latest.values())[:12]:
+        subject = belief.target_entity or "unspecified subject"
+        attribute = f".{belief.attribute}" if belief.attribute else ""
+        source = belief.source_event_id or "own_inference"
+        lines.append(
+            f"- [BELIEVED tick={belief.since_tick} confidence={belief.confidence:.2f} "
+            f"source={source}] {belief.kind}: {subject}{attribute} = {belief.believed_value!r}"
+        )
+    return "\n".join(lines)
 
 
 def _format_threads(threads: list) -> str:
@@ -364,7 +463,8 @@ def _format_communications(messages: list[dict] | None) -> str:
     if not messages:
         return ""
     return "\n".join(
-        f"- message_id={message['message_id']} | channel={message['channel_id']} | "
+        f"- [TOLD_BY tick={message['sent_at_tick']} sender={message['sender_id']}] "
+        f"message_id={message['message_id']} | channel={message['channel_id']} | "
         f"from {message['sender_name']} ({message['sender_id']}) at tick "
         f"{message['sent_at_tick']}: {message['content']}"
         for message in messages
@@ -375,7 +475,8 @@ def _format_feed(messages: list[dict] | None) -> str:
     if not messages:
         return ""
     return "\n".join(
-        f"- [{message['channel_id']}] {message['sender_name']}: {message['content']}"
+        f"- [FEED_POST channel={message['channel_id']}] "
+        f"{message['sender_name']}: {message['content']}"
         for message in messages
     )
 

@@ -233,13 +233,22 @@ class TickScheduler:
         agent_tasks = []
         for kami_id in sorted(agents_by_kami):
             for agent_id in sorted(agents_by_kami[kami_id]):
-                # Get recent personal events
-                recent = fs.get_events(
-                    session, kami_id=kami_id,
-                    since_tick=max(0, tick - 5), limit=5,
+                # Only include events the agent participated in or was present to observe.
+                recent = fs.get_agent_observed_events(
+                    session,
+                    agent_id=agent_id,
+                    since_tick=max(0, tick - 5),
+                    until_tick=tick - 1,
+                    limit=5,
                 )
                 recent_dicts = [
-                    {"tick": e.tick, "narrative": e.narrative, "event_type": e.event_type}
+                    {
+                        "event_id": e.event_id,
+                        "tick": e.tick,
+                        "narrative": e.narrative,
+                        "event_type": e.event_type,
+                        "source": "participated" if agent_id in (e.participants or []) else "witnessed",
+                    }
                     for e in recent
                 ]
                 agent_tasks.append(

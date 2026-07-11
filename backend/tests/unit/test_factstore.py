@@ -177,6 +177,51 @@ class TestEvents:
         ticks = [e.tick for e in events]
         assert all(2 <= t <= 4 for t in ticks)
 
+    def test_agent_observed_events_respect_historical_presence(self, session, world):
+        fs.create_entity(session, "kami", "Kami 2", tick=0, entity_id="kami_2")
+        fs.emit_event(
+            session,
+            tick=1,
+            kami_id="kami_1",
+            event_type="local",
+            narrative="The agent witnesses this.",
+        )
+        fs.emit_event(
+            session,
+            tick=1,
+            kami_id="kami_2",
+            event_type="remote",
+            narrative="This happens elsewhere.",
+        )
+        fs.move_entity(session, "agent_1", "kami_2", tick=3)
+        fs.emit_event(
+            session,
+            tick=4,
+            kami_id="kami_1",
+            event_type="old_room",
+            narrative="The agent has already left.",
+        )
+        fs.emit_event(
+            session,
+            tick=4,
+            kami_id="kami_2",
+            event_type="new_room",
+            narrative="The agent sees this after moving.",
+        )
+        fs.emit_event(
+            session,
+            tick=5,
+            kami_id="kami_1",
+            event_type="participant",
+            participants=["agent_1"],
+            narrative="A directly involving remote event remains known.",
+        )
+        session.commit()
+
+        observed = fs.get_agent_observed_events(session, "agent_1", 0, 5, limit=10)
+
+        assert [event.event_type for event in observed] == ["new_room", "local"]
+
 
 class TestKamiStateQuery:
     def test_query_kami_state(self, session, world):

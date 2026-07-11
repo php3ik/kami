@@ -9,6 +9,37 @@ import re
 from typing import Any
 
 
+VISIBLE_AGENT_STATE_ATTRIBUTES = {
+    "activity",
+    "posture",
+    "expression",
+    "visible_condition",
+    "clothing",
+    "carrying",
+    "injury",
+    "injured",
+    "wet",
+    "dirty",
+}
+
+SENSITIVE_STATE_MARKERS = {
+    "belief",
+    "emotion",
+    "fear",
+    "goal",
+    "hunger",
+    "intent",
+    "mood",
+    "password",
+    "private",
+    "secret",
+    "stress",
+    "task_pressure",
+    "thought",
+    "fatigue",
+}
+
+
 def validate_agent_output(
     output_text: str,
     known_names: set[str],
@@ -60,7 +91,7 @@ def filter_perception(
         filtered_entity = {
             "entity_id": eid,
             "kind": entity["kind"],
-            "states": entity.get("states", {}),
+            "states": _visible_states(entity),
         }
 
         # Name resolution: only use real name if agent knows them
@@ -78,3 +109,27 @@ def filter_perception(
         filtered["entities"].append(filtered_entity)
 
     return filtered
+
+
+def _visible_states(entity: dict[str, Any]) -> dict[str, Any]:
+    states = entity.get("states") or {}
+    if entity.get("kind") == "agent":
+        return {
+            key: value
+            for key, value in states.items()
+            if key.casefold() in VISIBLE_AGENT_STATE_ATTRIBUTES
+        }
+
+    visible = {}
+    is_closed = bool(states.get("container_closed")) or states.get("open") is False
+    is_sealed = bool(states.get("seal_intact")) or states.get("sealed") is True
+    for key, value in states.items():
+        normalized = key.casefold()
+        if normalized.startswith("_") or any(
+            marker in normalized for marker in SENSITIVE_STATE_MARKERS
+        ):
+            continue
+        if normalized in {"contents", "content", "inside"} and (is_closed or is_sealed):
+            continue
+        visible[key] = value
+    return visible

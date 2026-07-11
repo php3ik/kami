@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import and_
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
 from ..determinism import generate_id
@@ -480,6 +480,68 @@ def get_events(
     if until_tick is not None:
         q = q.filter(Event.tick <= until_tick)
     return q.order_by(Event.tick.desc()).limit(limit).all()
+
+
+def get_agent_observed_events(
+    session: Session,
+    agent_id: str,
+    since_tick: int | None = None,
+    until_tick: int | None = None,
+    limit: int = 20,
+) -> list[Event]:
+    """Return events the agent participated in or could observe in person.
+
+    Location intervals are half-open: a row closed at tick N is no longer
+    valid for events at tick N, while the replacement row starts at N.
+    """
+    agent = session.get(Entity, agent_id)
+    if agent is None or agent.kind != "agent":
+        return []
+
+    q = session.query(Event).filter(Event.simulation_id == agent.simulation_id)
+    if since_tick is not None:
+        q = q.filter(Event.tick >= since_tick)
+    if until_tick is not None:
+        q = q.filter(Event.tick <= until_tick)
+
+    locations = (
+        session.query(Location)
+        .filter(
+            Location.simulation_id == agent.simulation_id,
+            Location.entity_id == agent_id,
+        )
+        .all()
+    )
+    location_ids = {location.kami_id for location in locations}
+    if location_ids:
+        q = q.filter(
+            or_(
+                Event.kami_id.in_(location_ids),
+                Event.kami_id.is_(None),
+            )
+        )
+    else:
+        q = q.filter(Event.kami_id.is_(None))
+
+    def was_present(event: Event) -> bool:
+        if not event.kami_id:
+            return agent_id in (event.participants or [])
+        return any(
+            location.kami_id == event.kami_id
+            and location.since_tick <= event.tick
+            and (
+                location.valid_until_tick is None
+                or event.tick < location.valid_until_tick
+            )
+            for location in locations
+        )
+
+    observed = [
+        event
+        for event in q.order_by(Event.tick.desc()).all()
+        if was_present(event)
+    ]
+    return observed[: max(0, limit)]
 
 
 # --- Query helpers ---
